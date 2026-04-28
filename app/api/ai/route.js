@@ -1,10 +1,26 @@
 import { NextResponse } from "next/server";
+import fs from "fs";
+import path from "path";
 
 // Claude API 프록시. 키는 서버 .env에만 보관.
 // 클라이언트 lib/ai.js → POST /api/ai → Anthropic.
 
+function readKeyFromEnvFile() {
+  for (const name of [".env.local", ".env"]) {
+    try {
+      const p = path.join(process.cwd(), name);
+      const lines = fs.readFileSync(p, "utf8").split(/\r?\n/);
+      for (const line of lines) {
+        const m = line.match(/^ANTHROPIC_API_KEY=["']?([^"'\r\n]+)["']?/);
+        if (m) return m[1].trim();
+      }
+    } catch {}
+  }
+  return null;
+}
+
 export async function POST(req) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY || readKeyFromEnvFile();
   if (!apiKey) {
     return NextResponse.json(
       { error: "ANTHROPIC_API_KEY not configured" },
