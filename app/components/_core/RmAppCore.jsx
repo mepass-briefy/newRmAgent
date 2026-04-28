@@ -1817,17 +1817,15 @@ function ProjectList({ customer, projects, loading, c, onSelectProject, onCreate
   if (loading) return <Loading/>;
   return (
     <div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
-        <div>
-          <div style={{fontSize:18,fontWeight:800,color:c.text}}>{customer.company}</div>
-          <div style={{fontSize:13,color:c.textSub,marginTop:2}}>{customer.industry}{customer.domain?" / "+customer.domain:""}</div>
-        </div>
-        <Btn onClick={onCreateProject} c={c}>+ 새 프로젝트</Btn>
+      <div style={{marginBottom:20}}>
+        <div style={{fontSize:18,fontWeight:800,color:c.text}}>{customer.company}</div>
+        <div style={{fontSize:13,color:c.textSub,marginTop:2}}>{customer.industry}{customer.domain?" / "+customer.domain:""}</div>
+        <div style={{fontSize:12,color:c.textHint,marginTop:4}}>프로젝트 생성·관리는 고객관리에서 진행하세요</div>
       </div>
       {projects.length === 0 ? (
         <Card c={c} style={{textAlign:"center",padding:"36px 0"}}>
           <div style={{fontSize:32,marginBottom:10}}>📁</div>
-          <div style={{fontSize:13,color:c.textHint}}>프로젝트가 없어요. 새 프로젝트를 생성하세요.</div>
+          <div style={{fontSize:13,color:c.textHint}}>프로젝트가 없어요. 고객관리에서 프로젝트를 추가하세요.</div>
         </Card>
       ) : (
         <div style={{display:"grid",gap:10}}>
@@ -2875,7 +2873,6 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
   const [projects, setProjects] = useState([]);
   const [selectedProject, setSelectedProject] = useState(null);
   const [projectsLoading, setProjectsLoading] = useState(false);
-  const [showNewProject, setShowNewProject] = useState(false);
   const KEY = "customers:"+user.id;
 
   useEffect(() => { loadCustomers(KEY).then(d => { setCustomers(d); setLoading(false); }); }, [user.id]);
@@ -2972,13 +2969,7 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
     return (
       <div>
         <BackBtn onClick={() => { setSelected(null); setProjects([]); }}/>
-        <ProjectList customer={selected} projects={projects} loading={projectsLoading} c={c} onSelectProject={setSelectedProject} onCreateProject={() => setShowNewProject(true)}/>
-        {showNewProject && (
-          <NewProjectDialog customer={selected} c={c} onClose={() => setShowNewProject(false)} onCreate={async (title) => {
-            const proj = await createProject({ customerId: selected.id, title, rmId: selected.rm_name||null, status: selected.status||"신규접수" });
-            setProjects(prev => [...prev, proj]); setShowNewProject(false);
-          }}/>
-        )}
+        <ProjectList customer={selected} projects={projects} loading={projectsLoading} c={c} onSelectProject={setSelectedProject}/>
       </div>
     );
   }
