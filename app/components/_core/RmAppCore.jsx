@@ -1673,7 +1673,153 @@ const ANALYSIS_SYSTEM = `당신은 상담 분석 에이전트입니다.
 
 ## 리스크`;
 
-function ConsultNotes({ customerId, onExtracted }){
+// REQ-CONSULTING-003: 맥락 이탈 감지
+const DRIFT_CHECK_SYSTEM = `상담 맥락 분석 전문가입니다. 회의록이 현재 프로젝트 맥락에서 벗어나 다른 프로젝트나 업무 영역을 다루고 있는지 판단하세요.
+JSON만 응답: {"isDrift":boolean,"reason":"판단 이유 한 줄","newTopic":"새 주제 요약 (이탈 시만, 없으면 null)"}`;
+
+// REQ-CONSULTING-005: 시니어 AI Q&A
+const QA_SENIOR_SYSTEM = `당신은 GRIDGE의 시니어 RM 컨설턴트입니다. 회의록과 AI 분석 결과를 바탕으로 RM의 질문에 답변합니다.
+비즈니스 맥락, 숨겨진 니즈, 리스크, 놓치기 쉬운 관점을 짚어주세요. 간결하되 핵심을 놓치지 마세요.`;
+
+// REQ-PROJECT-002: 프로젝트 API 헬퍼
+async function fetchProjects(customerId) {
+  try {
+    const res = await fetch(`/api/projects?customerId=${encodeURIComponent(customerId)}`);
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (e) { return []; }
+}
+async function createProject(data) {
+  const res = await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!res.ok) throw new Error("프로젝트 생성 실패");
+  return await res.json();
+}
+async function updateProject(projectId, data) {
+  const res = await fetch(`/api/projects/${projectId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  if (!res.ok) throw new Error("프로젝트 업데이트 실패");
+  return await res.json();
+}
+
+// REQ-PROJECT-002: 새 프로젝트 생성 다이얼로그
+function NewProjectDialog({ customer, c, onClose, onCreate }) {
+  const [title, setTitle] = React.useState(customer.company + " 프로젝트");
+  const [creating, setCreating] = React.useState(false);
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{background:c.card,borderRadius:16,padding:28,width:400,maxWidth:"90vw",boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
+        <div style={{fontSize:16,fontWeight:800,color:c.text,marginBottom:16}}>새 프로젝트</div>
+        <Inp label="프로젝트 이름" value={title} onChange={setTitle} c={c}/>
+        <div style={{display:"flex",gap:8,marginTop:18}}>
+          <Btn onClick={onClose} variant="ghost" c={c} style={{flex:1}}>취소</Btn>
+          <Btn onClick={async () => { if(!title.trim()) return; setCreating(true); await onCreate(title.trim()); setCreating(false); }} c={c} style={{flex:2}} disabled={creating||!title.trim()}>{creating?"생성 중...":"생성"}</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// REQ-CONSULTING-003: 맥락 이탈 다이얼로그
+function ContextDriftDialog({ driftInfo, project, customer, onClose, onSameConsult, onNewProject }) {
+  const { c } = useTheme();
+  const [step, setStep] = React.useState(1);
+  const [sameCustomer, setSameCustomer] = React.useState(true);
+  const [newTitle, setNewTitle] = React.useState(driftInfo.newTopic || project.title + " (분리)");
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:1100,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{background:c.card,borderRadius:16,padding:28,width:500,maxWidth:"92vw",boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
+        {step === 1 && (
+          <>
+            <div style={{fontSize:16,fontWeight:800,color:c.text,marginBottom:10}}>맥락 변화 감지</div>
+            <div style={{fontSize:13,color:c.textSub,padding:"12px 14px",background:c.bg2,borderRadius:8,lineHeight:1.7,marginBottom:16}}>
+              <b>감지 이유:</b> {driftInfo.reason}
+              {driftInfo.newTopic && <div style={{marginTop:4}}><b>새 주제:</b> {driftInfo.newTopic}</div>}
+            </div>
+            <div style={{fontSize:13,fontWeight:600,color:c.text,marginBottom:10}}>이 내용을 어떻게 처리할까요?</div>
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:14}}>
+              <button onClick={() => setStep(2)} style={{padding:"14px 16px",borderRadius:10,border:"2px solid "+c.brand,background:c.brandLight,cursor:"pointer",textAlign:"left"}}>
+                <div style={{fontSize:13,fontWeight:700,color:c.brand}}>별도 프로젝트로 분리</div>
+                <div style={{fontSize:11,color:c.textSub,marginTop:3}}>새 프로젝트를 만들어 이 내용을 따로 관리해요</div>
+              </button>
+              <button onClick={() => { onSameConsult(driftInfo.newTopic || driftInfo.reason); onClose(); }} style={{padding:"14px 16px",borderRadius:10,border:"1.5px solid "+c.divider,background:c.card,cursor:"pointer",textAlign:"left"}}>
+                <div style={{fontSize:13,fontWeight:700,color:c.text}}>같은 상담으로 유지</div>
+                <div style={{fontSize:11,color:c.textSub,marginTop:3}}>현재 프로젝트에 포함하고 브리핑에 맥락 변화를 기록해요</div>
+              </button>
+            </div>
+            <button onClick={onClose} style={{width:"100%",padding:"8px",border:"none",background:"none",cursor:"pointer",fontSize:12,color:c.textHint}}>닫기 (나중에 처리)</button>
+          </>
+        )}
+        {step === 2 && (
+          <>
+            <div style={{fontSize:16,fontWeight:800,color:c.text,marginBottom:16}}>새 프로젝트 설정</div>
+            <div style={{marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:600,color:c.textSub,marginBottom:6}}>프로젝트 이름</div>
+              <input value={newTitle} onChange={e => setNewTitle(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:13,color:c.text,outline:"none",boxSizing:"border-box"}}/>
+            </div>
+            <div style={{marginBottom:18}}>
+              <div style={{fontSize:12,fontWeight:600,color:c.textSub,marginBottom:8}}>고객사</div>
+              <div style={{display:"flex",gap:8}}>
+                {[true, false].map(same => (
+                  <button key={same} onClick={() => setSameCustomer(same)} style={{flex:1,padding:"10px",borderRadius:8,border:"2px solid "+(sameCustomer===same?c.brand:c.divider),background:sameCustomer===same?c.brandLight:c.card,cursor:"pointer",fontSize:12,fontWeight:sameCustomer===same?700:500,color:sameCustomer===same?c.brand:c.text}}>
+                    {same ? customer.company+" (기존)" : "신규 고객 등록"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <Btn onClick={() => setStep(1)} variant="ghost" c={c} style={{flex:1}}>이전</Btn>
+              <Btn onClick={() => { onNewProject({ title: newTitle.trim()||project.title, sameCustomer, customerId: customer.id }); onClose(); }} c={c} style={{flex:2}} disabled={!newTitle.trim()}>프로젝트 생성</Btn>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// REQ-PROJECT-002: 프로젝트 목록 화면
+function ProjectList({ customer, projects, loading, c, onSelectProject, onCreateProject }) {
+  if (loading) return <Loading/>;
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:20}}>
+        <div>
+          <div style={{fontSize:18,fontWeight:800,color:c.text}}>{customer.company}</div>
+          <div style={{fontSize:13,color:c.textSub,marginTop:2}}>{customer.industry}{customer.domain?" / "+customer.domain:""}</div>
+        </div>
+        <Btn onClick={onCreateProject} c={c}>+ 새 프로젝트</Btn>
+      </div>
+      {projects.length === 0 ? (
+        <Card c={c} style={{textAlign:"center",padding:"36px 0"}}>
+          <div style={{fontSize:32,marginBottom:10}}>📁</div>
+          <div style={{fontSize:13,color:c.textHint}}>프로젝트가 없어요. 새 프로젝트를 생성하세요.</div>
+        </Card>
+      ) : (
+        <div style={{display:"grid",gap:10}}>
+          {projects.map(proj => (
+            <Card key={proj.id} c={c} style={{padding:"16px 20px",cursor:"pointer"}} onClick={() => onSelectProject(proj)}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div>
+                  <div style={{fontSize:14,fontWeight:700,color:c.text}}>{proj.title}</div>
+                  <div style={{fontSize:12,color:c.textSub,marginTop:3}}>
+                    {proj.rmId && <span>{proj.rmId} · </span>}
+                    {proj.lastActionAt && <span>최근 활동 {String(proj.lastActionAt).slice(0,10)}</span>}
+                    {proj.briefing && <span style={{marginLeft:8,color:"#37B24D",fontWeight:600}}>● 브리핑 완료</span>}
+                  </div>
+                </div>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <Badge status={proj.status || "신규접수"}/>
+                  <span style={{fontSize:16,color:c.textSub}}>›</span>
+                </div>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDriftNewProject, onContextChanged }){
   const { c } = useTheme();
   const [notes, setNotes] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -1682,66 +1828,127 @@ function ConsultNotes({ customerId, onExtracted }){
   const [extractedInfo, setExtractedInfo] = useState(null);
   const [nextAction, setNextAction] = useState("");
   const [fileMap, setFileMap] = useState({});
+  const [driftInfo, setDriftInfo] = useState(null);
+  const [qaHistory, setQaHistory] = useState([]);
+  const [qaInput, setQaInput] = useState("");
+  const [qaLoading, setQaLoading] = useState(false);
+
   useEffect(() => {
-    store.get("notes:"+customerId, []).then(d => { setNotes(d); if(d.length > 0) setActiveId(d[0].id); setLoading(false); });
-  }, [customerId]);
+    const load = async () => {
+      if (projectId) {
+        try {
+          const res = await fetch(`/api/notes/project/${projectId}`);
+          const data = res.ok ? await res.json() : [];
+          const arr = Array.isArray(data) ? data : [];
+          setNotes(arr);
+          if (arr.length > 0) setActiveId(arr[0].id);
+        } catch (e) { setNotes([]); }
+      } else {
+        const d = await store.get("notes:"+customerId, []);
+        setNotes(d); if (d.length > 0) setActiveId(d[0].id);
+      }
+      setLoading(false);
+    };
+    load();
+  }, [projectId, customerId]);
+
   useEffect(() => {
-    if(!activeId) return;
+    if (!activeId) return;
     const n = notes.find(n => n.id === activeId);
-    if(n) setNextAction(n.next_action || "");
-    setExtractedInfo(null);
+    if (n) setNextAction(n.next_action || "");
+    setExtractedInfo(null); setDriftInfo(null); setQaHistory([]);
   }, [activeId]);
-  async function saveAll(u){ setNotes(u); await store.set("notes:"+customerId, u); }
+
+  async function saveAll(u) {
+    setNotes(u);
+    if (projectId) {
+      await fetch(`/api/notes/project/${projectId}`, { method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(u) });
+    } else {
+      await store.set("notes:"+customerId, u);
+    }
+  }
   function updNote(id, field, val){ setNotes(p => p.map(n => n.id === id ? {...n, [field]: val} : n)); }
   async function addTab(){
     const seq = notes.length + 1;
     const n = {id: String(Date.now()), seq, title: seq+"차 상담", date: todayDate, content: ""};
-    await saveAll(notes.concat([n]));
-    setActiveId(n.id);
+    await saveAll(notes.concat([n])); setActiveId(n.id);
   }
   async function processFiles(fl){
     const added = [];
-    for(let i = 0; i < fl.length; i++){
+    for (let i = 0; i < fl.length; i++){
       const file = fl[i];
-      if(file.size > 10*1024*1024){ alert(file.name+": 최대 10MB"); continue; }
+      if (file.size > 10*1024*1024){ alert(file.name+": 최대 10MB"); continue; }
       let type = "text", mediaType = "", data = "";
-      if(file.type === "application/pdf"){ type = "pdf"; data = await readFileAsBase64(file); }
-      else if(file.type.startsWith("image/")){ type = "image"; mediaType = file.type; data = await readFileAsBase64(file); }
+      if (file.type === "application/pdf"){ type = "pdf"; data = await readFileAsBase64(file); }
+      else if (file.type.startsWith("image/")){ type = "image"; mediaType = file.type; data = await readFileAsBase64(file); }
       else data = await readFileAsText(file);
       added.push({name: file.name, type, mediaType, data, size: file.size});
     }
-    if(added.length > 0) setFileMap(p => ({...p, [activeId]: (p[activeId]||[]).concat(added)}));
+    if (added.length > 0) setFileMap(p => ({...p, [activeId]: (p[activeId]||[]).concat(added)}));
   }
   async function analyzeNote(note){
     const atts = fileMap[note.id] || [];
-    if(!note.content && atts.length === 0){ alert("내용이 없습니다"); return; }
-    setAnalyzing(true); setExtractedInfo(null);
+    if (!note.content && atts.length === 0){ alert("내용이 없습니다"); return; }
+    setAnalyzing(true); setExtractedInfo(null); setDriftInfo(null); setQaHistory([]);
     try {
       const userMsg = note.content ? "회의록:\n"+note.content : "첨부 파일을 분석해주세요.";
       const analysisText = await callClaude(ANALYSIS_SYSTEM, userMsg, 2000, atts);
       const updated = notes.map(n => n.id === note.id ? {...n, analysis: analysisText} : n);
       await saveAll(updated);
+      // 정보 추출
       const exText = await callClaude('회의록에서 고객 정보를 JSON으로 추출. {"domain":null,"industry":null,"budget":null,"team_composition":null,"has_decision_maker":null,"next_actions":null}', userMsg, 400, atts);
       try {
         const m = exText.match(/\{[\s\S]*\}/);
-        if(m){
+        if (m){
           const parsed = JSON.parse(m[0]);
-          if(parsed.next_actions) setNextAction(parsed.next_actions);
+          if (parsed.next_actions) setNextAction(parsed.next_actions);
           const keys = ["domain","industry","budget","team_composition","has_decision_maker"];
           const filtered = {};
-          keys.forEach(k => { if(parsed[k] !== null && parsed[k] !== undefined && parsed[k] !== "") filtered[k] = parsed[k]; });
-          if(Object.keys(filtered).length > 0) setExtractedInfo(filtered);
+          keys.forEach(k => { if (parsed[k] !== null && parsed[k] !== undefined && parsed[k] !== "") filtered[k] = parsed[k]; });
+          if (Object.keys(filtered).length > 0) setExtractedInfo(filtered);
         }
       } catch(e){}
+      // REQ-CONSULTING-003: 맥락 이탈 감지 (프로젝트 모드에서만)
+      if (projectId && note.content) {
+        try {
+          const driftMsg = `현재 프로젝트: ${projectTitle || "프로젝트"}\n\n회의록:\n${note.content}`;
+          const driftText = await callClaude(DRIFT_CHECK_SYSTEM, driftMsg, 300);
+          const dm = driftText.match(/\{[\s\S]*\}/);
+          if (dm){ const drift = JSON.parse(dm[0]); if (drift.isDrift) setDriftInfo(drift); }
+        } catch(e){}
+      }
     } catch(e){ alert("분석 오류: "+e.message); }
     setAnalyzing(false);
   }
+  async function askAI(){
+    if (!qaInput.trim()) return;
+    const q = qaInput.trim(); setQaInput(""); setQaLoading(true);
+    const activeNote = notes.find(n => n.id === activeId);
+    try {
+      const ctx = `회의록:\n${activeNote?.content||""}\n\nAI 분석:\n${activeNote?.analysis||""}`;
+      const answer = await callClaude(QA_SENIOR_SYSTEM, `${ctx}\n\n질문: ${q}`, 1200);
+      setQaHistory(prev => [...prev, {q, a: answer}]);
+    } catch(e){ setQaHistory(prev => [...prev, {q, a: "오류: "+e.message}]); }
+    setQaLoading(false);
+  }
+
   const active = notes.find(n => n.id === activeId);
   const activeFiles = activeId ? (fileMap[activeId]||[]) : [];
-  if(loading) return <Loading/>;
+  if (loading) return <Loading/>;
   const taStyle = {width:"100%",padding:"10px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:13,color:c.text,outline:"none",resize:"vertical"};
   return (
     <div>
+      {/* 맥락 이탈 다이얼로그 */}
+      {driftInfo && active && (
+        <ContextDriftDialog
+          driftInfo={driftInfo}
+          project={{id: projectId, title: projectTitle}}
+          customer={{id: customerId}}
+          onClose={() => setDriftInfo(null)}
+          onSameConsult={(changeNote) => { if (onContextChanged) onContextChanged(changeNote); setDriftInfo(null); }}
+          onNewProject={(data) => { if (onDriftNewProject) onDriftNewProject(data); setDriftInfo(null); }}
+        />
+      )}
       <div style={{display:"flex",alignItems:"center",gap:4,borderBottom:"1px solid "+c.divider,marginBottom:14}}>
         {notes.map(n => (
           <button key={n.id} onClick={() => setActiveId(n.id)} style={{padding:"8px 14px",border:"none",background:"none",cursor:"pointer",fontSize:12,fontWeight:activeId===n.id?700:500,color:activeId===n.id?c.brand:c.textSub,borderBottom:activeId===n.id?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>{n.title}</button>
@@ -1760,7 +1967,7 @@ function ConsultNotes({ customerId, onExtracted }){
           </div>
           <div style={{marginBottom:12}}>
             <div style={{fontSize:12,color:c.textSub,marginBottom:6,fontWeight:600}}>첨부 파일</div>
-            <div onClick={() => { const inp = document.createElement("input"); inp.type = "file"; inp.multiple = true; inp.accept = ".pdf,.txt,image/*"; inp.onchange = e => processFiles(e.target.files); inp.click(); }}
+            <div onClick={() => { const inp = document.createElement("input"); inp.type="file"; inp.multiple=true; inp.accept=".pdf,.txt,image/*"; inp.onchange=e=>processFiles(e.target.files); inp.click(); }}
               style={{padding:14,borderRadius:8,border:"2px dashed "+c.inputBorder,cursor:"pointer",display:"flex",alignItems:"center",gap:10,color:c.textSub,fontSize:12}}>
               📁 클릭해서 파일 첨부
             </div>
@@ -1769,15 +1976,15 @@ function ConsultNotes({ customerId, onExtracted }){
                 {activeFiles.map((f, i) => (
                   <span key={i} style={{padding:"4px 10px",borderRadius:8,background:c.bg2,border:"1px solid "+c.divider,fontSize:11,color:c.text}}>
                     📎 {f.name}
-                    <button onClick={() => setFileMap(p => ({...p, [activeId]: (p[activeId]||[]).filter((_, j) => j !== i)}))} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint,marginLeft:4}}>×</button>
+                    <button onClick={() => setFileMap(p => ({...p, [activeId]: (p[activeId]||[]).filter((_,j)=>j!==i)}))} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint,marginLeft:4}}>×</button>
                   </span>
                 ))}
               </div>
             )}
           </div>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginBottom:14}}>
-            <Btn onClick={() => analyzeNote(active)} variant="secondary" c={c} style={{padding:"7px 16px",fontSize:12}} disabled={analyzing}>{analyzing ? "분석 중..." : "AI 분석"}</Btn>
-            <Btn onClick={() => store.set("notes:"+customerId, notes)} c={c} style={{padding:"7px 18px",fontSize:12}}>저장</Btn>
+            <Btn onClick={() => analyzeNote(active)} variant="secondary" c={c} style={{padding:"7px 16px",fontSize:12}} disabled={analyzing}>{analyzing?"분석 중...":"AI 분석"}</Btn>
+            <Btn onClick={() => saveAll(notes)} c={c} style={{padding:"7px 18px",fontSize:12}}>저장</Btn>
           </div>
           {extractedInfo && (
             <div style={{marginBottom:12,padding:"12px 14px",background:c.brandLight,borderRadius:8}}>
@@ -1800,9 +2007,34 @@ function ConsultNotes({ customerId, onExtracted }){
               <div style={{padding:"12px 14px"}}><MdBlock text={active.analysis} c={c}/></div>
             </div>
           )}
+          {/* REQ-CONSULTING-005: 시니어 AI Q&A */}
+          {active.analysis && (
+            <div style={{marginBottom:12,borderRadius:8,border:"1px solid "+c.brand+"44",overflow:"hidden"}}>
+              <div style={{padding:"9px 14px",background:c.brandLight,fontSize:12,fontWeight:700,color:c.brand}}>시니어 AI에게 질문하기</div>
+              <div style={{padding:"12px 14px"}}>
+                <div style={{fontSize:11,color:c.textSub,marginBottom:10}}>분석 결과를 바탕으로 궁금한 점이나 추가 인사이트를 질문해보세요.</div>
+                {qaHistory.length > 0 && (
+                  <div style={{marginBottom:12,display:"flex",flexDirection:"column",gap:12}}>
+                    {qaHistory.map((item, i) => (
+                      <div key={i}>
+                        <div style={{fontSize:12,fontWeight:700,color:c.brand,marginBottom:4}}>Q. {item.q}</div>
+                        <div style={{fontSize:12,color:c.text,padding:"10px 12px",background:c.bg2,borderRadius:8,lineHeight:1.7}}>
+                          <MdBlock text={item.a} c={c}/>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{display:"flex",gap:8}}>
+                  <input value={qaInput} onChange={e => setQaInput(e.target.value)} onKeyDown={e => { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();askAI();}}} placeholder="궁금한 점을 입력하세요 (Enter로 전송)" style={{flex:1,padding:"9px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none"}}/>
+                  <Btn onClick={askAI} c={c} style={{padding:"7px 16px",fontSize:12}} disabled={qaLoading||!qaInput.trim()}>{qaLoading?"답변 중...":"질문"}</Btn>
+                </div>
+              </div>
+            </div>
+          )}
           <div style={{padding:"14px 16px",background:c.brandLight,borderRadius:8}}>
             <div style={{fontSize:12,fontWeight:700,color:c.brand,marginBottom:8}}>다음 액션</div>
-            <textarea value={nextAction} onChange={e => setNextAction(e.target.value)} placeholder="다음 액션" rows={3} style={{...taStyle, background:c.card}}/>
+            <textarea value={nextAction} onChange={e => setNextAction(e.target.value)} placeholder="다음 액션" rows={3} style={{...taStyle,background:c.card}}/>
             <div style={{display:"flex",justifyContent:"flex-end",marginTop:8}}>
               <Btn onClick={async () => { await saveAll(notes.map(n => n.id === activeId ? {...n, next_action: nextAction} : n)); }} c={c} style={{padding:"6px 16px",fontSize:12}}>저장</Btn>
             </div>
@@ -2061,30 +2293,35 @@ const BRIEFING_SYSTEM = `미팅 사전 브리핑 에이전트입니다.
 ## 심층 질문셋
 ## RM 한줄 정리`;
 
-function BriefingDetail({ customer, onBack, onUpdate }){
+function BriefingDetail({ project, customer, onBack, onUpdate }){
   const { c } = useTheme();
   const [generating, setGenerating] = useState(false);
-  const [briefing, setBriefing] = useState(customer.briefing || null);
-  const [history, setHistory] = useState(customer.briefing_history || []);
+  const [briefing, setBriefing] = useState(project?.briefing || null);
+  const [history, setHistory] = useState(project?.briefing_history || []);
   const [viewingEntry, setViewingEntry] = useState(null);
-  const [rmMemo, setRmMemo] = useState(customer.rm_memo || "");
+  const [rmMemo, setRmMemo] = useState(project?.rm_memo || "");
   const [copied, setCopied] = useState(false);
 
   async function generate(){
     setGenerating(true);
     try {
-      const notes = await store.get("notes:"+customer.id, []);
+      // REQ-PROJECT-001: 프로젝트 노트 사용
+      const notesRes = await fetch(`/api/notes/project/${project.id}`);
+      const notes = notesRes.ok ? await notesRes.json() : [];
       const notesText = notes.length > 0 ? notes.map((n, idx) => "["+(idx+1)+"차 "+n.date+"]\n"+(n.content||"")).join("\n---\n") : "상담 기록 없음";
-      const userMsg = "회사: "+customer.company+"\n산업: "+(customer.industry||"")+"\n도메인: "+(customer.domain||"")+"\n\n상담:\n"+notesText;
+      // REQ-CONSULTING-004: 맥락 변화 포함
+      const prevEntry = history[history.length-1];
+      const contextChanges = prevEntry?.context_changes?.map(ch => ch.note).join("; ") || "";
+      const userMsg = "회사: "+customer.company+"\n산업: "+(customer.industry||"")+"\n도메인: "+(customer.domain||"")+
+        (contextChanges ? "\n\n[맥락 변화 기록]\n"+contextChanges : "")+"\n\n상담:\n"+notesText;
       const text = await callClaude(BRIEFING_SYSTEM, userMsg, 3000);
       const newEntry = {version: history.length + 1, text, timestamp: new Date().toISOString(), noteCount: notes.length};
-      const newHistory = history.concat([newEntry]);
+      const newHistory = [...history, newEntry];
       setHistory(newHistory);
-      const updated = {...customer, briefing: text, briefing_history: newHistory};
-      updated.status = autoStatus(updated);
-      setBriefing(text);
-      setViewingEntry(null);
-      await onUpdate(updated);
+      setBriefing(text); setViewingEntry(null);
+      const updatedProject = {...project, briefing: text, briefing_history: newHistory};
+      const saved = await updateProject(project.id, updatedProject);
+      onUpdate(saved);
     } catch(e){ setBriefing("오류: "+e.message); }
     setGenerating(false);
   }
@@ -2108,8 +2345,8 @@ function BriefingDetail({ customer, onBack, onUpdate }){
       <BackBtn onClick={onBack}/>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16,flexWrap:"wrap",gap:12}}>
         <div>
-          <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>{customer.company} 미팅 브리핑</div>
-          <div style={{fontSize:12,color:c.textSub}}>{customer.industry}{customer.domain?" / "+customer.domain:""}</div>
+          <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>{project.title}</div>
+          <div style={{fontSize:12,color:c.textSub}}>{customer.company} · {customer.industry}{customer.domain?" / "+customer.domain:""}</div>
         </div>
         <Btn onClick={generate} c={c} disabled={generating}>{generating ? "생성 중..." : (briefing ? "재생성" : "브리핑 생성")}</Btn>
       </div>
@@ -2196,6 +2433,12 @@ function BriefingDetail({ customer, onBack, onUpdate }){
                       상담 {entry.noteCount}건 기반
                     </div>
                   )}
+                  {/* REQ-CONSULTING-004: 맥락 변화 표시 */}
+                  {entry.context_changes && entry.context_changes.length > 0 && (
+                    <div style={{fontSize:10,color:"#F08C00",marginTop:3}}>
+                      맥락 변화 {entry.context_changes.length}건 기록됨
+                    </div>
+                  )}
                 </button>
               );
             })}
@@ -2206,7 +2449,7 @@ function BriefingDetail({ customer, onBack, onUpdate }){
         <div style={{fontSize:13,fontWeight:700,color:c.text,marginBottom:8}}>RM 메모</div>
         <textarea value={rmMemo} onChange={e => setRmMemo(e.target.value)} rows={4} placeholder="미팅 전 개인 메모 (브리핑에 반영 안됨)" style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",resize:"vertical",boxSizing:"border-box",lineHeight:1.6}}/>
         <div style={{display:"flex",justifyContent:"flex-end",marginTop:8}}>
-          <Btn onClick={async () => { await onUpdate({...customer, rm_memo: rmMemo}); }} c={c} style={{padding:"7px 20px",fontSize:12}}>저장</Btn>
+          <Btn onClick={async () => { const saved = await updateProject(project.id, {...project, rm_memo: rmMemo}); onUpdate(saved); }} c={c} style={{padding:"7px 20px",fontSize:12}}>저장</Btn>
         </div>
       </Card>
     </div>
@@ -2220,41 +2463,125 @@ function Consulting({ user }){
   const [customers, setCustomers] = useState([]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [projects, setProjects] = useState([]);
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [showNewProject, setShowNewProject] = useState(false);
   const KEY = "customers:"+user.id;
+
   useEffect(() => { loadCustomers(KEY).then(d => { setCustomers(d); setLoading(false); }); }, [user.id]);
+
   async function updateCustomer(updated){
     const fresh = await store.get(KEY, []);
     const list = fresh.map(cu => cu.id === updated.id ? updated : cu);
-    setCustomers(list);
-    await store.set(KEY, list);
-    setSelected(updated);
+    setCustomers(list); await store.set(KEY, list); setSelected(updated);
   }
+
+  async function handleSelectCustomer(cu){
+    setSelected(cu); setSelectedProject(null); setProjectsLoading(true);
+    let list = await fetchProjects(cu.id);
+    // REQ-PROJECT-002: 프로젝트 없으면 기존 고객 데이터로 자동 생성
+    if (list.length === 0) {
+      const defaultProj = await createProject({
+        customerId: cu.id,
+        title: cu.company + " 프로젝트",
+        rmId: cu.rm_name || null,
+        status: cu.status || "신규접수",
+        briefing: cu.briefing || null,
+        briefing_history: cu.briefing_history || [],
+        proposal_data: cu.proposal_data || null,
+        proposal_history: cu.proposal_history || [],
+        rm_memo: cu.rm_memo || "",
+      });
+      list = [defaultProj];
+    }
+    setProjects(list); setProjectsLoading(false);
+  }
+
+  async function handleUpdateProject(updated){
+    setSelectedProject(updated);
+    setProjects(prev => prev.map(p => p.id === updated.id ? updated : p));
+  }
+
+  async function handleContextChanged(changeNote){
+    if (!selectedProject) return;
+    const h = [...(selectedProject.briefing_history || [])];
+    if (h.length > 0) {
+      const last = {...h[h.length-1]};
+      last.context_changes = [...(last.context_changes||[]), {note: changeNote, at: new Date().toISOString()}];
+      h[h.length-1] = last;
+    }
+    const saved = await updateProject(selectedProject.id, {...selectedProject, briefing_history: h});
+    handleUpdateProject(saved);
+  }
+
+  async function handleDriftNewProject(data){
+    if (data.sameCustomer) {
+      const proj = await createProject({ customerId: data.customerId, title: data.title, rmId: selected?.rm_name||null, status: "신규접수" });
+      setProjects(prev => [...prev, proj]);
+      alert(`"${proj.title}" 프로젝트가 생성됐어요. 상담관리에서 선택할 수 있어요.`);
+    } else {
+      alert("신규 고객 등록은 고객관리 메뉴에서 진행해주세요.");
+    }
+  }
+
   const activeList = customers.filter(cu => !["계약성사","이탈"].includes(cu.status));
-  if(selected){
-    if(tab === "브리핑") return <BriefingDetail customer={selected} onBack={() => setSelected(null)} onUpdate={updateCustomer}/>;
-    if(tab === "회의록분석") return <div><BackBtn onClick={() => setSelected(null)}/><div style={{fontSize:18,fontWeight:800,color:c.text,marginBottom:20}}>{selected.company} 회의록 분석</div><ConsultNotes customerId={selected.id} onExtracted={async info => { await updateCustomer({...selected, ...info}); }}/></div>;
-    if(tab === "팀빌딩") return <TeamBuildingDetail customer={selected} onBack={() => setSelected(null)} onUpdate={updateCustomer}/>;
+
+  // 프로젝트 선택 후 탭 콘텐츠
+  if (selected && selectedProject) {
+    if (tab === "브리핑") return <BriefingDetail project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>;
+    if (tab === "회의록분석") return (
+      <div>
+        <BackBtn onClick={() => setSelectedProject(null)}/>
+        <div style={{fontSize:18,fontWeight:800,color:c.text,marginBottom:2}}>{selectedProject.title}</div>
+        <div style={{fontSize:13,color:c.textSub,marginBottom:20}}>{selected.company}</div>
+        <ConsultNotes
+          projectId={selectedProject.id}
+          customerId={selected.id}
+          projectTitle={selectedProject.title}
+          onExtracted={async info => { await updateCustomer({...selected, ...info}); }}
+          onDriftNewProject={handleDriftNewProject}
+          onContextChanged={handleContextChanged}
+        />
+      </div>
+    );
+    if (tab === "팀빌딩") return <TeamBuildingDetail customer={{...selected, ...selectedProject}} onBack={() => setSelectedProject(null)} onUpdate={async u => { await updateCustomer(u); }}/>;
   }
+
+  // 고객 선택 후 프로젝트 목록
+  if (selected && !selectedProject) {
+    return (
+      <div>
+        <BackBtn onClick={() => { setSelected(null); setProjects([]); }}/>
+        <ProjectList customer={selected} projects={projects} loading={projectsLoading} c={c} onSelectProject={setSelectedProject} onCreateProject={() => setShowNewProject(true)}/>
+        {showNewProject && (
+          <NewProjectDialog customer={selected} c={c} onClose={() => setShowNewProject(false)} onCreate={async (title) => {
+            const proj = await createProject({ customerId: selected.id, title, rmId: selected.rm_name||null, status: selected.status||"신규접수" });
+            setProjects(prev => [...prev, proj]); setShowNewProject(false);
+          }}/>
+        )}
+      </div>
+    );
+  }
+
+  // 고객 목록
   return (
     <div>
       <div style={{fontSize:18,fontWeight:700,color:c.text,marginBottom:4}}>상담관리</div>
       <div style={{fontSize:13,color:c.textSub,marginBottom:20}}>AI 기반 상담 인텔리전스</div>
       <div style={{display:"flex",gap:0,borderBottom:"1px solid "+c.divider,marginBottom:24}}>
         {["브리핑","회의록분석","팀빌딩"].map(t => (
-          <button key={t} onClick={() => { setTab(t); setSelected(null); }} style={{padding:"8px 16px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:tab===t?700:500,color:tab===t?c.brand:c.textSub,borderBottom:tab===t?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>{t}</button>
+          <button key={t} onClick={() => { setTab(t); setSelected(null); setSelectedProject(null); }} style={{padding:"8px 16px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:tab===t?700:500,color:tab===t?c.brand:c.textSub,borderBottom:tab===t?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>{t}</button>
         ))}
       </div>
       {loading ? <Loading/> : activeList.length === 0 ? <Card c={c}><div style={{textAlign:"center",padding:"24px 0",color:c.textHint}}>진행 중인 고객이 없어요</div></Card> : (
         <div style={{display:"grid",gap:10}}>
           {activeList.map(cu => (
-            <Card key={cu.id} c={c} style={{padding:"16px 20px"}} onClick={() => setSelected(cu)}>
+            <Card key={cu.id} c={c} style={{padding:"16px 20px"}} onClick={() => handleSelectCustomer(cu)}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
                   <div style={{fontSize:14,fontWeight:700,color:c.text}}>{cu.company}</div>
-                  <div style={{fontSize:12,color:c.textSub,marginTop:2}}>{cu.industry}{cu.domain?" / "+cu.domain:""} · {cu.rm_name || "RM 미배정"}
-                    {tab === "팀빌딩" && (cu.proposal_data || cu.team_building) && <span style={{marginLeft:8,color:"#37B24D",fontWeight:600}}>● 제안서 있음</span>}
-                    {tab === "브리핑" && cu.briefing && <span style={{marginLeft:8,color:"#37B24D",fontWeight:600}}>● 완료</span>}
-                  </div>
+                  <div style={{fontSize:12,color:c.textSub,marginTop:2}}>{cu.industry}{cu.domain?" / "+cu.domain:""} · {cu.rm_name||"RM 미배정"}</div>
                 </div>
                 <div style={{display:"flex",alignItems:"center",gap:10}}><Badge status={cu.status}/><span style={{fontSize:16,color:c.textSub}}>›</span></div>
               </div>

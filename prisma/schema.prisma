@@ -44,13 +44,28 @@ model Customer {
   @@index([userId, status])
 }
 
-model Note {
-  id         String @id
-  customerId String
-  data       String // JSON: REQ-CONSULTING-002 노트 객체
-  seq        Int    @default(1)
+model Project {
+  id           String   @id
+  customerId   String
+  title        String
+  rmId         String?
+  status       String?  @default("신규접수")
+  data         String   @default("{}") // JSON: briefing, briefing_history, proposal_data, rm_memo 등
+  createdAt    DateTime @default(now())
+  lastActionAt DateTime @default(now())
 
   @@index([customerId])
+}
+
+model Note {
+  id         String  @id
+  customerId String
+  projectId  String? // REQ-PROJECT-001: 프로젝트 단위 노트
+  data       String  // JSON: REQ-CONSULTING-002 노트 객체
+  seq        Int     @default(1)
+
+  @@index([customerId])
+  @@index([projectId])
 }
 
 model Rate {
