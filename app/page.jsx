@@ -27,6 +27,11 @@ export default function Page() {
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [perms, setPerms] = useState(DEFAULT_PERMS);
   const [page, setPage] = useState("dashboard");
+  const [consultingTarget, setConsultingTarget] = useState(null);
+  function goToConsulting(customer, project) {
+    setConsultingTarget({ customer, project });
+    setPage("consulting");
+  }
   const [collapsed, setCollapsed] = useState(false);
   const [calcOpen, setCalcOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
@@ -151,8 +156,8 @@ export default function Page() {
                 <TopBar dark={dark} toggleTheme={toggle} currentUser={currentUser} onOpenCalc={() => setCalcOpen(true)} />
                 <div style={{ flex: 1, padding: 24, overflowY: "auto" }}>
                   {page === "dashboard" && <Dashboard user={currentUser} />}
-                  {page === "customers" && <Customers team={team} setTeam={setTeam} user={currentUser} />}
-                  {page === "consulting" && <Consulting user={currentUser} />}
+                  {page === "customers" && <Customers team={team} setTeam={setTeam} user={currentUser} onGoConsulting={goToConsulting} />}
+                  {page === "consulting" && <Consulting user={currentUser} initialTarget={consultingTarget} onConsumeTarget={() => setConsultingTarget(null)} />}
                   {page === "contract" && <Contract user={currentUser} />}
                   {page === "workers" && <Workers />}
                   {page === "settings" && <Settings team={team} setTeam={setTeam} currentUser={currentUser} perms={perms} setPerms={setPerms} />}

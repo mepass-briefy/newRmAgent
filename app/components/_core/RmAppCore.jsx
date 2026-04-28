@@ -1677,9 +1677,11 @@ const ANALYSIS_SYSTEM = `당신은 상담 분석 에이전트입니다.
 const DRIFT_CHECK_SYSTEM = `상담 맥락 분석 전문가입니다. 회의록이 현재 프로젝트 맥락에서 벗어나 다른 프로젝트나 업무 영역을 다루고 있는지 판단하세요.
 JSON만 응답: {"isDrift":boolean,"reason":"판단 이유 한 줄","newTopic":"새 주제 요약 (이탈 시만, 없으면 null)"}`;
 
-// REQ-CONSULTING-005: 시니어 AI Q&A
-const QA_SENIOR_SYSTEM = `당신은 GRIDGE의 시니어 RM 컨설턴트입니다. 회의록과 AI 분석 결과를 바탕으로 RM의 질문에 답변합니다.
-비즈니스 맥락, 숨겨진 니즈, 리스크, 놓치기 쉬운 관점을 짚어주세요. 간결하되 핵심을 놓치지 마세요.`;
+// REQ-CONSULTING-005: AI 내용 보충
+const SUPPLEMENT_SYSTEM = `회의록 분석 내용 보완 에이전트입니다.
+RM이 AI 분석 결과에서 잘못되었거나 보완이 필요하다고 지적한 부분을 수정하여, 수정된 완전한 분석 내용을 반환합니다.
+- 지적된 부분만 정확하게 수정하고, 나머지는 원본 그대로 유지하세요.
+- 수정된 전체 분석 마크다운만 반환하세요. 설명이나 전문/후문 없이 분석 내용만 반환합니다.`;
 
 // REQ-PROJECT-002: 프로젝트 API 헬퍼
 async function fetchProjects(customerId) {
@@ -1829,9 +1831,8 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
   const [nextAction, setNextAction] = useState("");
   const [fileMap, setFileMap] = useState({});
   const [driftInfo, setDriftInfo] = useState(null);
-  const [qaHistory, setQaHistory] = useState([]);
-  const [qaInput, setQaInput] = useState("");
-  const [qaLoading, setQaLoading] = useState(false);
+  const [supplementInput, setSupplementInput] = useState("");
+  const [supplementLoading, setSupplementLoading] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -1856,7 +1857,7 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
     if (!activeId) return;
     const n = notes.find(n => n.id === activeId);
     if (n) setNextAction(n.next_action || "");
-    setExtractedInfo(null); setDriftInfo(null); setQaHistory([]);
+    setExtractedInfo(null); setDriftInfo(null); setSupplementInput("");
   }, [activeId]);
 
   async function saveAll(u) {
@@ -1920,16 +1921,17 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
     } catch(e){ alert("분석 오류: "+e.message); }
     setAnalyzing(false);
   }
-  async function askAI(){
-    if (!qaInput.trim()) return;
-    const q = qaInput.trim(); setQaInput(""); setQaLoading(true);
-    const activeNote = notes.find(n => n.id === activeId);
+  async function supplementAnalysis(){
+    if (!supplementInput.trim() || !active?.analysis) return;
+    setSupplementLoading(true);
     try {
-      const ctx = `회의록:\n${activeNote?.content||""}\n\nAI 분석:\n${activeNote?.analysis||""}`;
-      const answer = await callClaude(QA_SENIOR_SYSTEM, `${ctx}\n\n질문: ${q}`, 1200);
-      setQaHistory(prev => [...prev, {q, a: answer}]);
-    } catch(e){ setQaHistory(prev => [...prev, {q, a: "오류: "+e.message}]); }
-    setQaLoading(false);
+      const userMsg = `원본 분석:\n${active.analysis}\n\n수정/보완 요청:\n${supplementInput}`;
+      const corrected = await callClaude(SUPPLEMENT_SYSTEM, userMsg, 2000);
+      const updated = notes.map(n => n.id === activeId ? {...n, analysis: corrected} : n);
+      await saveAll(updated);
+      setSupplementInput("");
+    } catch(e){ alert("보충 오류: "+e.message); }
+    setSupplementLoading(false);
   }
 
   const active = notes.find(n => n.id === activeId);
@@ -2007,27 +2009,15 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
               <div style={{padding:"12px 14px"}}><MdBlock text={active.analysis} c={c}/></div>
             </div>
           )}
-          {/* REQ-CONSULTING-005: 시니어 AI Q&A */}
+          {/* REQ-CONSULTING-005: AI로 내용 보충하기 */}
           {active.analysis && (
             <div style={{marginBottom:12,borderRadius:8,border:"1px solid "+c.brand+"44",overflow:"hidden"}}>
-              <div style={{padding:"9px 14px",background:c.brandLight,fontSize:12,fontWeight:700,color:c.brand}}>시니어 AI에게 질문하기</div>
+              <div style={{padding:"9px 14px",background:c.brandLight,fontSize:12,fontWeight:700,color:c.brand}}>AI로 내용 보충하기</div>
               <div style={{padding:"12px 14px"}}>
-                <div style={{fontSize:11,color:c.textSub,marginBottom:10}}>분석 결과를 바탕으로 궁금한 점이나 추가 인사이트를 질문해보세요.</div>
-                {qaHistory.length > 0 && (
-                  <div style={{marginBottom:12,display:"flex",flexDirection:"column",gap:12}}>
-                    {qaHistory.map((item, i) => (
-                      <div key={i}>
-                        <div style={{fontSize:12,fontWeight:700,color:c.brand,marginBottom:4}}>Q. {item.q}</div>
-                        <div style={{fontSize:12,color:c.text,padding:"10px 12px",background:c.bg2,borderRadius:8,lineHeight:1.7}}>
-                          <MdBlock text={item.a} c={c}/>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div style={{display:"flex",gap:8}}>
-                  <input value={qaInput} onChange={e => setQaInput(e.target.value)} onKeyDown={e => { if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();askAI();}}} placeholder="궁금한 점을 입력하세요 (Enter로 전송)" style={{flex:1,padding:"9px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none"}}/>
-                  <Btn onClick={askAI} c={c} style={{padding:"7px 16px",fontSize:12}} disabled={qaLoading||!qaInput.trim()}>{qaLoading?"답변 중...":"질문"}</Btn>
+                <div style={{fontSize:11,color:c.textSub,marginBottom:10}}>분석 내용 중 이상하거나 보완이 필요한 부분을 설명해주세요. AI가 해당 부분을 수정한 분석으로 업데이트합니다.</div>
+                <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+                  <textarea value={supplementInput} onChange={e => setSupplementInput(e.target.value)} rows={2} placeholder="예: 팀 규모 추정이 잘못된 것 같아요. 실제로는 5명이라고 했어요." style={{flex:1,padding:"9px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",resize:"none"}}/>
+                  <Btn onClick={supplementAnalysis} c={c} style={{padding:"9px 16px",fontSize:12,whiteSpace:"nowrap"}} disabled={supplementLoading||!supplementInput.trim()}>{supplementLoading?"보충 중...":"보충하기"}</Btn>
                 </div>
               </div>
             </div>
@@ -2046,10 +2036,17 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
 }
 
 /* ─── CUSTOMER DETAIL ─── */
-function CustomerDetail({ customer: init, onBack, onUpdate, team, setTeam }){
+function CustomerDetail({ customer: init, onBack, onUpdate, team, setTeam, onGoConsulting }){
   const { c } = useTheme();
   const [cu, setCu] = useState(() => { const s = autoStatus(init); return s !== init.status ? {...init, status: s} : init; });
   const [saving, setSaving] = useState(false);
+  const [projects, setProjects] = useState([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [showNewProj, setShowNewProj] = useState(false);
+  useEffect(() => {
+    setProjectsLoading(true);
+    fetchProjects(cu.id).then(list => { setProjects(list); setProjectsLoading(false); });
+  }, [cu.id]);
   function upd(k, v){
     setCu(p => {
       const next = {...p, [k]: v};
@@ -2153,8 +2150,36 @@ function CustomerDetail({ customer: init, onBack, onUpdate, team, setTeam }){
         </div>
       </div>
       <Card c={c} style={{marginBottom:16}}>
-        <div style={{fontSize:14,fontWeight:700,color:c.text,marginBottom:16}}>상담 노트</div>
-        <ConsultNotes customerId={cu.id} onExtracted={info => setCu(p => ({...p, ...info}))}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{fontSize:14,fontWeight:700,color:c.text}}>프로젝트</div>
+          <Btn onClick={() => setShowNewProj(true)} c={c} style={{padding:"5px 14px",fontSize:12}}>+ 새 프로젝트</Btn>
+        </div>
+        {projectsLoading ? <Loading/> : projects.length === 0 ? (
+          <div style={{textAlign:"center",padding:"16px 0",color:c.textHint,fontSize:13}}>프로젝트가 없어요</div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {projects.map(proj => (
+              <div key={proj.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",borderRadius:8,border:"1px solid "+c.divider,background:c.bg2}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:c.text}}>{proj.title}</div>
+                  <div style={{fontSize:11,color:c.textSub,marginTop:2}}>{proj.status}</div>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <Badge status={proj.status}/>
+                  {onGoConsulting && (
+                    <Btn onClick={() => onGoConsulting(cu, proj)} c={c} style={{padding:"5px 12px",fontSize:11}}>상담 시작</Btn>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {showNewProj && (
+          <NewProjectDialog customer={cu} c={c} onClose={() => setShowNewProj(false)} onCreate={async (title) => {
+            const proj = await createProject({ customerId: cu.id, title, rmId: cu.rm_name||null, status: cu.status||"신규접수" });
+            setProjects(prev => [...prev, proj]); setShowNewProj(false);
+          }}/>
+        )}
       </Card>
       <Card c={c}>
         <div style={{fontSize:14,fontWeight:700,color:c.text,marginBottom:12}}>메모</div>
@@ -2232,7 +2257,7 @@ function NewCustomerForm({ onClose, onAdd, team, setTeam }){
   );
 }
 
-function Customers({ team, setTeam, user }){
+function Customers({ team, setTeam, user, onGoConsulting }){
   const { c } = useTheme();
   const [customers, setCustomers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2244,7 +2269,7 @@ function Customers({ team, setTeam, user }){
   async function saveAll(list){ setCustomers(list); await store.set(KEY, list); }
   const list = filter === "전체" ? customers : customers.filter(cu => cu.status === filter);
   if(showForm) return <NewCustomerForm onClose={() => setShowForm(false)} onAdd={async cu => { await saveAll([cu].concat(customers)); setShowForm(false); }} team={team} setTeam={setTeam}/>;
-  if(selected) return <CustomerDetail customer={selected} onBack={() => setSelected(null)} onUpdate={async u => { await saveAll(customers.map(cu => cu.id === u.id ? u : cu)); }} team={team} setTeam={setTeam}/>;
+  if(selected) return <CustomerDetail customer={selected} onBack={() => setSelected(null)} onUpdate={async u => { await saveAll(customers.map(cu => cu.id === u.id ? u : cu)); }} team={team} setTeam={setTeam} onGoConsulting={onGoConsulting}/>;
   return (
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
@@ -2457,7 +2482,7 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
 }
 
 /* ─── CONSULTING ─── */
-function Consulting({ user }){
+function Consulting({ user, initialTarget, onConsumeTarget }){
   const { c } = useTheme();
   const [tab, setTab] = useState("브리핑");
   const [customers, setCustomers] = useState([]);
@@ -2470,6 +2495,15 @@ function Consulting({ user }){
   const KEY = "customers:"+user.id;
 
   useEffect(() => { loadCustomers(KEY).then(d => { setCustomers(d); setLoading(false); }); }, [user.id]);
+
+  useEffect(() => {
+    if (initialTarget) {
+      setSelected(initialTarget.customer);
+      setSelectedProject(initialTarget.project);
+      setProjects([initialTarget.project]);
+      if (onConsumeTarget) onConsumeTarget();
+    }
+  }, [initialTarget]);
 
   async function updateCustomer(updated){
     const fresh = await store.get(KEY, []);
