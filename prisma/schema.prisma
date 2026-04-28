@@ -1,0 +1,82 @@
+// CRM RM v2 — JSON 블롭 + 인덱스 칼럼 하이브리드.
+// 기존 window.storage 키별 저장 모델을 그대로 옮기되, 자주 필터링되는 필드는 별도 칼럼으로 노출.
+//
+// 매핑:
+//   teams                      → TeamMember
+//   customers:{userId}         → Customer (userId 인덱스)
+//   notes:{customerId}         → Note (customerId 인덱스)
+//   rates                      → Rate (role 단위)
+//   categories                 → Category
+//   perms                      → Perm
+//   proposal_revision_patterns → Pattern
+//   session                    → 쿠키 (DB 미저장)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model TeamMember {
+  id        String   @id
+  name      String
+  email     String?
+  password  String?  // POC: 평문 저장 (운영 시 해싱 필수, ACC-AUTH-004)
+  grade     String?
+  isAdmin   Boolean  @default(false)
+  tagOnly   Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Customer {
+  id           String   @id
+  userId       String   // 사용자별 분리 (ACC-DATA-001)
+  data         String   // JSON: REQ-DATAMODEL-002 전체 객체
+  status       String?  // 인덱스용 미러 (REQ-PIPELINE-001)
+  company      String?  // 검색용 미러
+  createdAt    DateTime @default(now())
+  lastActionAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, status])
+}
+
+model Note {
+  id         String @id
+  customerId String
+  data       String // JSON: REQ-CONSULTING-002 노트 객체
+  seq        Int    @default(1)
+
+  @@index([customerId])
+}
+
+model Rate {
+  role     String @id // 직무명 (예: "Web 개발자")
+  category String
+  grades   String // JSON: [{g, r}] 등급별 시급
+}
+
+model Category {
+  id    String  @id
+  label String
+  desc  String?
+}
+
+model Perm {
+  menuId   String  @id // "customers" | "consulting" | "contract" | "workers"
+  rmAllow    Boolean @default(false)
+  leadAllow  Boolean @default(false)
+  adminAllow Boolean @default(true)
+}
+
+model Pattern {
+  id        String   @id
+  pattern   String
+  count     Int      @default(1)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+}
