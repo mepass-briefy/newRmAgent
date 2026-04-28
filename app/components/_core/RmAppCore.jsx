@@ -1961,20 +1961,21 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
     } catch(e){ alert("분석 오류: "+e.message); }
     setAnalyzing(false);
   }
+  const active = notes.find(function(n) { return n.id === activeId; });
+
   async function supplementAnalysis(){
-    if (!supplementInput.trim() || !active?.analysis) return;
+    var currentActive = notes.find(function(n) { return n.id === activeId; });
+    if (!supplementInput.trim() || !currentActive || !currentActive.analysis) return;
     setSupplementLoading(true);
     try {
-      const userMsg = `원본 분석:\n${active.analysis}\n\n수정/보완 요청:\n${supplementInput}`;
-      const corrected = await callClaude(SUPPLEMENT_SYSTEM, userMsg, 2000);
-      const updated = notes.map(n => n.id === activeId ? {...n, analysis: corrected} : n);
+      var userMsg = "원본 분석:\n"+currentActive.analysis+"\n\n수정/보완 요청:\n"+supplementInput;
+      var corrected = await callClaude(SUPPLEMENT_SYSTEM, userMsg, 2000);
+      var updated = notes.map(function(n) { return n.id === activeId ? Object.assign({}, n, {analysis: corrected}) : n; });
       await saveAll(updated);
       setSupplementInput("");
     } catch(e){ alert("보충 오류: "+e.message); }
     setSupplementLoading(false);
   }
-
-  const active = notes.find(n => n.id === activeId);
   const activeFiles = activeId ? (fileMap[activeId]||[]) : [];
   if (loading) return <Loading/>;
   const taStyle = {width:"100%",padding:"10px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:13,color:c.text,outline:"none",resize:"vertical"};
@@ -2376,10 +2377,11 @@ function Customers({ team, setTeam, user, onGoConsulting }){
 
 // 태그 입력 헬퍼 (must_have / should_have / out_of_scope)
 function TagInput({ label, items, onChange, c, placeholder }) {
-  const [input, setInput] = React.useState("");
+  const [input, setInput] = useState("");
   function addItem() {
-    if (!input.trim()) return;
-    onChange([...(items||[]), input.trim()]);
+    var trimmed = input.trim();
+    if (!trimmed) return;
+    onChange((items||[]).concat([trimmed]));
     setInput("");
   }
   return (
@@ -2507,7 +2509,8 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
     setAutoFilling(true);
     try {
       const notesRes = await fetch("/api/notes/project/"+project.id);
-      const notes = notesRes.ok ? await notesRes.json() : [];
+      const notesRaw = notesRes.ok ? await notesRes.json() : [];
+      const notes = Array.isArray(notesRaw) ? notesRaw : [];
       const notesText = notes.length > 0 ? notes.map(function(n, idx) {
         var parts = ["["+(idx+1)+"차 "+(n.date||"")+"]"];
         if (n.type) parts.push("유형: "+n.type);
@@ -2523,32 +2526,34 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
       var mt = raw.match(/\{[\s\S]*\}/);
       if (!mt) throw new Error("JSON 파싱 실패");
       var parsed = JSON.parse(mt[0]);
-      setStr(function(prev) {
-        return {
-          project_name: parsed.project_name || prev.project_name,
-          project_background: parsed.project_background || prev.project_background,
-          project_goal: parsed.project_goal || prev.project_goal,
-          must_have: Array.isArray(parsed.must_have) ? parsed.must_have : prev.must_have,
-          should_have: Array.isArray(parsed.should_have) ? parsed.should_have : prev.should_have,
-          out_of_scope: Array.isArray(parsed.out_of_scope) ? parsed.out_of_scope : prev.out_of_scope,
-          timeline: parsed.timeline || prev.timeline,
-          budget_range: parsed.budget_range || prev.budget_range,
-          tech_constraints: parsed.tech_constraints || prev.tech_constraints,
-          decision_maker: parsed.decision_maker || prev.decision_maker,
-          contact_person: parsed.contact_person || prev.contact_person,
-          stakeholders: parsed.stakeholders || prev.stakeholders,
-          known_unknowns: parsed.known_unknowns || prev.known_unknowns,
-          our_assumptions: parsed.our_assumptions || prev.our_assumptions,
-          previous_attempts: parsed.previous_attempts || prev.previous_attempts,
-        };
-      });
+      var filled = {
+        project_name: parsed.project_name || str.project_name,
+        project_background: parsed.project_background || str.project_background,
+        project_goal: parsed.project_goal || str.project_goal,
+        must_have: Array.isArray(parsed.must_have) ? parsed.must_have : str.must_have,
+        should_have: Array.isArray(parsed.should_have) ? parsed.should_have : str.should_have,
+        out_of_scope: Array.isArray(parsed.out_of_scope) ? parsed.out_of_scope : str.out_of_scope,
+        timeline: parsed.timeline || str.timeline,
+        budget_range: parsed.budget_range || str.budget_range,
+        tech_constraints: parsed.tech_constraints || str.tech_constraints,
+        decision_maker: parsed.decision_maker || str.decision_maker,
+        contact_person: parsed.contact_person || str.contact_person,
+        stakeholders: parsed.stakeholders || str.stakeholders,
+        known_unknowns: parsed.known_unknowns || str.known_unknowns,
+        our_assumptions: parsed.our_assumptions || str.our_assumptions,
+        previous_attempts: parsed.previous_attempts || str.previous_attempts,
+      };
+      setStr(filled);
+      // 자동 정리 완료 즉시 저장
+      const savedProj = await updateProject(project.id, Object.assign({}, project, {briefing_structured: filled}));
+      onUpdate(savedProj);
     } catch(e) { alert("AI 자동 정리 오류: "+e.message); }
     setAutoFilling(false);
   }
 
   async function saveStructured() {
     setSavingStr(true);
-    const updated = {...project, briefing_structured: str};
+    const updated = Object.assign({}, project, {briefing_structured: str});
     const saved = await updateProject(project.id, updated);
     onUpdate(saved);
     setSavingStr(false);
@@ -2558,8 +2563,9 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
     setGenerating(true);
     try {
       // REQ-PROJECT-001: 프로젝트 노트 사용
-      const notesRes = await fetch(`/api/notes/project/${project.id}`);
-      const notes = notesRes.ok ? await notesRes.json() : [];
+      const notesRes = await fetch("/api/notes/project/"+project.id);
+      const notesRaw = notesRes.ok ? await notesRes.json() : [];
+      const notes = Array.isArray(notesRaw) ? notesRaw : [];
       const notesText = notes.length > 0 ? notes.map(function(n, idx) {
         var parts = ["["+(idx+1)+"차 "+n.date+"]"];
         if (n.summary) parts.push("요약: "+n.summary);
@@ -2578,10 +2584,10 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
         (contextChanges ? "\n\n[맥락 변화 기록]\n"+contextChanges : "")+strBlock+"\n\n상담:\n"+notesText;
       const text = await callClaude(BRIEFING_SYSTEM, userMsg, 3000);
       const newEntry = {version: history.length + 1, text, timestamp: new Date().toISOString(), noteCount: notes.length};
-      const newHistory = [...history, newEntry];
+      const newHistory = history.concat([newEntry]);
       setHistory(newHistory);
       setBriefing(text); setViewingEntry(null);
-      const updatedProject = {...project, briefing: text, briefing_history: newHistory};
+      const updatedProject = Object.assign({}, project, {briefing: text, briefing_history: newHistory});
       const saved = await updateProject(project.id, updatedProject);
       onUpdate(saved);
     } catch(e){ alert("브리핑 생성 오류: "+e.message); }
@@ -2722,7 +2728,7 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
             {history.length === 0 && (
               <div style={{fontSize:11,color:c.textHint,textAlign:"center",padding:"16px 0"}}>이력 없음</div>
             )}
-            {[...history].reverse().map(entry => {
+            {history.slice().reverse().map(function(entry) {
               const isLatest = entry.version === history.length;
               const isCurrent = !isViewingHistory && isLatest;
               const isSelected = isViewingHistory && viewingEntry.version === entry.version;
@@ -2783,7 +2789,8 @@ function ConsultRfp({ project, customer, onBack, onUpdate }) {
     setGenerating(true);
     try {
       const notesRes = await fetch("/api/notes/project/"+project.id);
-      const notes = notesRes.ok ? await notesRes.json() : [];
+      const notesRaw = notesRes.ok ? await notesRes.json() : [];
+      const notes = Array.isArray(notesRaw) ? notesRaw : [];
       const notesJson = JSON.stringify(notes.map(function(n) {
         return { date: n.date, type: n.type, summary: n.summary, content: n.content, client_requests: n.client_requests, concerns: n.concerns };
       }));
@@ -2794,8 +2801,22 @@ function ConsultRfp({ project, customer, onBack, onUpdate }) {
       const mt = raw.match(/\{[\s\S]*\}/);
       if (!mt) throw new Error("JSON 파싱 실패");
       const parsed = JSON.parse(mt[0]);
-      setRfp(parsed);
-      const updated = {...project, rfp: parsed};
+      if (typeof parsed !== "object" || parsed === null) throw new Error("RFP 데이터 형식 오류");
+      const normalizedParsed = Object.assign({}, parsed, {
+        scope_of_work: Array.isArray(parsed.scope_of_work) ? parsed.scope_of_work : [],
+        must_have: Array.isArray(parsed.must_have) ? parsed.must_have : [],
+        should_have: Array.isArray(parsed.should_have) ? parsed.should_have : [],
+        out_of_scope: Array.isArray(parsed.out_of_scope) ? parsed.out_of_scope : [],
+        known_facts: Array.isArray(parsed.known_facts) ? parsed.known_facts : [],
+        assumptions: Array.isArray(parsed.assumptions) ? parsed.assumptions : [],
+        unknown_questions: Array.isArray(parsed.unknown_questions) ? parsed.unknown_questions : [],
+        stakeholders: Array.isArray(parsed.stakeholders) ? parsed.stakeholders : [],
+        success_criteria: Array.isArray(parsed.success_criteria) ? parsed.success_criteria : [],
+        problem_cases: Array.isArray(parsed.problem_cases) ? parsed.problem_cases : [],
+        explicit_exclusions: Array.isArray(parsed.explicit_exclusions) ? parsed.explicit_exclusions : [],
+      });
+      setRfp(normalizedParsed);
+      const updated = Object.assign({}, project, {rfp: normalizedParsed});
       const saved = await updateProject(project.id, updated);
       onUpdate(saved);
     } catch(e) { alert("RFP 생성 오류: "+e.message); }
@@ -2805,7 +2826,7 @@ function ConsultRfp({ project, customer, onBack, onUpdate }) {
   async function saveRfp(updated) {
     setSaving(true);
     setRfp(updated);
-    const proj = {...project, rfp: updated};
+    const proj = Object.assign({}, project, {rfp: updated});
     const saved = await updateProject(project.id, proj);
     onUpdate(saved);
     setSaving(false);
