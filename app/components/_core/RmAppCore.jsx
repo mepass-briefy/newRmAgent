@@ -2480,7 +2480,7 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
       const updatedProject = {...project, briefing: text, briefing_history: newHistory};
       const saved = await updateProject(project.id, updatedProject);
       onUpdate(saved);
-    } catch(e){ setBriefing("오류: "+e.message); }
+    } catch(e){ alert("브리핑 생성 오류: "+e.message); }
     setGenerating(false);
   }
 
