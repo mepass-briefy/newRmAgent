@@ -2403,6 +2403,38 @@ function TagInput({ label, items, onChange, c, placeholder }) {
   );
 }
 
+const STRUCTURED_SYSTEM = `당신은 IT 프로젝트 요구사항 분석 전문가입니다.
+RM이 고객과 나눈 상담 노트와 고객 정보를 분석하여, 아래 JSON 구조를 빠짐없이 상세하게 작성합니다.
+
+규칙:
+1. 모든 텍스트는 한국어로 작성합니다.
+2. 명시된 내용은 구체적으로, 추정이 필요한 경우 "(추정)" 접두어를 붙입니다.
+3. must_have는 고객이 절대 포기할 수 없는 핵심 요건만 — 최대 5개, 각 항목을 한 문장으로 명확하게.
+4. should_have는 있으면 좋은 것들을 구체적으로, 항목당 한 문장.
+5. out_of_scope는 명시적으로 제외된 것 또는 이번 범위가 아닌 것.
+6. project_background와 project_goal은 3~5문장으로 충분히 상세히 서술합니다.
+7. known_unknowns, our_assumptions, previous_attempts는 비어 있지 않도록 — 정보가 없으면 "(확인 필요)"로 채웁니다.
+8. 응답은 JSON만 반환합니다. 설명 텍스트 없이.
+
+반환할 JSON 구조:
+{
+  "project_name": "프로젝트 명칭",
+  "project_background": "프로젝트를 추진하게 된 배경과 이유를 3~5문장으로 상세히",
+  "project_goal": "프로젝트 완료 후 고객 조직에서 달라져야 할 것을 3~5문장으로 outcome 중심으로",
+  "must_have": ["반드시 필요한 핵심 요건 1", "핵심 요건 2"],
+  "should_have": ["있으면 좋은 것 1", "있으면 좋은 것 2"],
+  "out_of_scope": ["이번 범위에서 제외된 것 1"],
+  "timeline": "기대하는 일정 (예: 2025년 3분기, 6개월 이내 등)",
+  "budget_range": "예산 범위 (예: 2억~3억, 미정 등)",
+  "tech_constraints": "기술 제약사항 (예: 기존 ERP 연동 필수, AWS만 사용 등. 없으면 없음)",
+  "decision_maker": "최종 의사결정권자 이름/직책",
+  "contact_person": "실무 담당자 이름/직책",
+  "stakeholders": "기타 이해관계자 (예: IT팀장, 현업 부서장 등)",
+  "known_unknowns": "고객 스스로 모른다고 한 것, 아직 결정 안 된 것",
+  "our_assumptions": "RM이 맥락상 추정하는 것 (확인 필요 항목들)",
+  "previous_attempts": "고객이 이미 시도해봤거나 검토한 솔루션/방법"
+}`;
+
 const BRIEFING_SYSTEM = `미팅 사전 브리핑 에이전트입니다.
 ## 한줄 니즈 요약
 ## 산업 구조 & 프로덕트 트렌드
@@ -2440,7 +2472,51 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
       previous_attempts: "",
     };
   });
+  const [autoFilling, setAutoFilling] = useState(false);
   function updStr(k, v) { setStr(function(p) { return {...p, [k]: v}; }); }
+
+  async function autoFill() {
+    setAutoFilling(true);
+    try {
+      const notesRes = await fetch("/api/notes/project/"+project.id);
+      const notes = notesRes.ok ? await notesRes.json() : [];
+      const notesText = notes.length > 0 ? notes.map(function(n, idx) {
+        var parts = ["["+(idx+1)+"차 "+(n.date||"")+"]"];
+        if (n.type) parts.push("유형: "+n.type);
+        if (n.summary) parts.push("요약: "+n.summary);
+        if (n.content) parts.push("내용: "+n.content);
+        if (n.client_requests) parts.push("고객 요청: "+n.client_requests);
+        if (n.concerns) parts.push("우려사항: "+n.concerns);
+        if (n.next_action) parts.push("다음 액션: "+n.next_action);
+        return parts.join("\n");
+      }).join("\n---\n") : "상담 기록 없음";
+      var userMsg = "[고객 정보]\n회사: "+(customer.company||"")+"\n산업: "+(customer.industry||"")+"\n도메인: "+(customer.domain||"")+"\n프로젝트: "+project.title+"\n\n[상담 노트]\n"+notesText;
+      var raw = await callClaude(STRUCTURED_SYSTEM, userMsg, 3000);
+      var mt = raw.match(/\{[\s\S]*\}/);
+      if (!mt) throw new Error("JSON 파싱 실패");
+      var parsed = JSON.parse(mt[0]);
+      setStr(function(prev) {
+        return {
+          project_name: parsed.project_name || prev.project_name,
+          project_background: parsed.project_background || prev.project_background,
+          project_goal: parsed.project_goal || prev.project_goal,
+          must_have: Array.isArray(parsed.must_have) ? parsed.must_have : prev.must_have,
+          should_have: Array.isArray(parsed.should_have) ? parsed.should_have : prev.should_have,
+          out_of_scope: Array.isArray(parsed.out_of_scope) ? parsed.out_of_scope : prev.out_of_scope,
+          timeline: parsed.timeline || prev.timeline,
+          budget_range: parsed.budget_range || prev.budget_range,
+          tech_constraints: parsed.tech_constraints || prev.tech_constraints,
+          decision_maker: parsed.decision_maker || prev.decision_maker,
+          contact_person: parsed.contact_person || prev.contact_person,
+          stakeholders: parsed.stakeholders || prev.stakeholders,
+          known_unknowns: parsed.known_unknowns || prev.known_unknowns,
+          our_assumptions: parsed.our_assumptions || prev.our_assumptions,
+          previous_attempts: parsed.previous_attempts || prev.previous_attempts,
+        };
+      });
+    } catch(e) { alert("AI 자동 정리 오류: "+e.message); }
+    setAutoFilling(false);
+  }
 
   async function saveStructured() {
     setSavingStr(true);
@@ -2516,7 +2592,11 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
         <div style={{marginBottom:16,borderRadius:12,border:"1.5px solid "+c.brand+"44",overflow:"hidden"}}>
           <div style={{padding:"10px 16px",background:c.brandLight,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <span style={{fontSize:13,fontWeight:700,color:c.brand}}>요구사항 정리</span>
-            <Btn onClick={saveStructured} c={c} disabled={savingStr} style={{padding:"5px 14px",fontSize:12}}>{savingStr?"저장 중...":"저장"}</Btn>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              {autoFilling && <span style={{fontSize:11,color:c.brand,fontWeight:600}}>AI 분석 중...</span>}
+              <Btn onClick={autoFill} c={c} disabled={autoFilling} variant="ghost" style={{padding:"5px 14px",fontSize:12}}>AI 자동 정리</Btn>
+              <Btn onClick={saveStructured} c={c} disabled={savingStr} style={{padding:"5px 14px",fontSize:12}}>{savingStr?"저장 중...":"저장"}</Btn>
+            </div>
           </div>
           <div style={{padding:16}}>
             {/* 프로젝트 개요 */}
