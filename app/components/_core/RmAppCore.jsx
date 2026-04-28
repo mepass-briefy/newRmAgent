@@ -1683,6 +1683,40 @@ RM이 AI 분석 결과에서 잘못되었거나 보완이 필요하다고 지적
 - 지적된 부분만 정확하게 수정하고, 나머지는 원본 그대로 유지하세요.
 - 수정된 전체 분석 마크다운만 반환하세요. 설명이나 전문/후문 없이 분석 내용만 반환합니다.`;
 
+// REQ-CONSULTING-006: RFP 생성
+const RFP_SYSTEM = `당신은 IT 프로젝트 RFP 작성 전문가입니다.
+브리핑 데이터와 상담 노트를 분석해 RFP 초안을 JSON으로 생성합니다.
+
+규칙:
+1. 브리핑·노트에 명시된 것만 known_facts로 분류합니다.
+2. 맥락으로 유추한 것은 source를 반드시 "추정"으로 표시합니다.
+3. 중요하지만 확인되지 않은 것은 unknown_questions에 넣습니다.
+4. goal_statement는 산출물(output)이 아닌 결과(outcome) 중심으로 씁니다.
+5. must_have는 최대 5개, 진짜 필수만.
+6. 모든 텍스트는 한국어. 응답은 JSON만 반환합니다.
+
+{
+  "problem_statement": "핵심 문제 한 문장",
+  "problem_cases": ["사례"],
+  "root_cause": "근본 원인",
+  "goal_statement": "목표 (outcome 중심)",
+  "current_state": "현재 상태",
+  "target_state": "목표 상태",
+  "out_of_scope": ["제외항목"],
+  "known_facts": [{"content": "사실", "source": "브리핑 v1"}],
+  "assumptions": [{"content": "추정", "source": "추정"}],
+  "unknown_questions": ["확인 필요한 질문"],
+  "must_have": [{"item": "필수항목", "reason": "이유"}],
+  "should_have": [{"item": "희망항목", "priority": "상", "reason": "이유"}],
+  "explicit_exclusions": [{"item": "제외항목", "reason": "이유"}],
+  "timeline": "일정",
+  "budget_range": "예산",
+  "tech_constraints": "기술 제약",
+  "org_constraints": "조직 제약",
+  "stakeholders": [{"role": "역할", "name": "이름", "responsibility": "책임", "interest": "이익"}],
+  "success_criteria": [{"metric": "지표", "target": "목표값", "measurement_method": "측정방법", "measurable": true}]
+}`;
+
 // REQ-PROJECT-002: 프로젝트 API 헬퍼
 async function fetchProjects(customerId) {
   try {
@@ -1889,10 +1923,16 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
   }
   async function analyzeNote(note){
     const atts = fileMap[note.id] || [];
-    if (!note.content && atts.length === 0){ alert("내용이 없습니다"); return; }
-    setAnalyzing(true); setExtractedInfo(null); setDriftInfo(null); setQaHistory([]);
+    const hasText = note.content || note.summary || note.client_requests || note.concerns;
+    if (!hasText && atts.length === 0){ alert("내용이 없습니다"); return; }
+    setAnalyzing(true); setExtractedInfo(null); setDriftInfo(null); setSupplementInput("");
     try {
-      const userMsg = note.content ? "회의록:\n"+note.content : "첨부 파일을 분석해주세요.";
+      const parts = [];
+      if (note.summary) parts.push("한 줄 요약: "+note.summary);
+      if (note.content) parts.push("논의 내용:\n"+note.content);
+      if (note.client_requests) parts.push("고객 요청사항:\n"+note.client_requests);
+      if (note.concerns) parts.push("우려·미결 사항:\n"+note.concerns);
+      const userMsg = parts.length > 0 ? parts.join("\n\n") : "첨부 파일을 분석해주세요.";
       const analysisText = await callClaude(ANALYSIS_SYSTEM, userMsg, 2000, atts);
       const updated = notes.map(n => n.id === note.id ? {...n, analysis: analysisText} : n);
       await saveAll(updated);
@@ -1910,9 +1950,10 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
         }
       } catch(e){}
       // REQ-CONSULTING-003: 맥락 이탈 감지 (프로젝트 모드에서만)
-      if (projectId && note.content) {
+      const driftContent = [note.summary, note.content].filter(Boolean).join("\n");
+      if (projectId && driftContent) {
         try {
-          const driftMsg = `현재 프로젝트: ${projectTitle || "프로젝트"}\n\n회의록:\n${note.content}`;
+          const driftMsg = "현재 프로젝트: "+(projectTitle||"프로젝트")+"\n\n회의록:\n"+driftContent;
           const driftText = await callClaude(DRIFT_CHECK_SYSTEM, driftMsg, 300);
           const dm = driftText.match(/\{[\s\S]*\}/);
           if (dm){ const drift = JSON.parse(dm[0]); if (drift.isDrift) setDriftInfo(drift); }
@@ -1959,13 +2000,36 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
       </div>
       {active ? (
         <div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:12}}>
             <Inp label="상담 제목" value={active.title} onChange={v => updNote(active.id, "title", v)} c={c}/>
             <Inp label="상담 날짜" value={active.date} onChange={v => updNote(active.id, "date", v)} c={c}/>
+            <div>
+              <div style={{fontSize:12,color:c.textSub,marginBottom:7,fontWeight:600}}>유형</div>
+              <select value={active.type||"미팅"} onChange={e => updNote(active.id, "type", e.target.value)} style={{width:"100%",padding:"11px 14px",borderRadius:12,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:13,color:c.text,outline:"none"}}>
+                {["미팅","전화","이메일","기타"].map(t => <option key={t}>{t}</option>)}
+              </select>
+            </div>
           </div>
           <div style={{marginBottom:12}}>
-            <div style={{fontSize:12,color:c.textSub,marginBottom:6,fontWeight:600}}>회의록</div>
+            <Inp label="한 줄 요약" value={active.summary||""} onChange={v => updNote(active.id, "summary", v)} c={c}/>
+          </div>
+          <div style={{marginBottom:12}}>
+            <div style={{fontSize:12,color:c.textSub,marginBottom:6,fontWeight:600}}>논의 내용</div>
             <textarea value={active.content||""} onChange={e => updNote(active.id, "content", e.target.value)} placeholder="회의록을 붙여넣으세요" rows={5} style={taStyle}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:600,color:"#2F9E44",marginBottom:6}}>고객 요청사항</div>
+              <textarea value={active.client_requests||""} onChange={e => updNote(active.id, "client_requests", e.target.value)} rows={3} placeholder="고객이 명시적으로 요청한 것" style={taStyle}/>
+            </div>
+            <div>
+              <div style={{fontSize:12,fontWeight:600,color:"#E67700",marginBottom:6}}>우려·미결 사항</div>
+              <textarea value={active.concerns||""} onChange={e => updNote(active.id, "concerns", e.target.value)} rows={3} placeholder="고객의 우려 또는 미결된 사항" style={taStyle}/>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+            <input type="checkbox" id={"confirmed_"+active.id} checked={!!active.confirmed_by_client} onChange={e => updNote(active.id, "confirmed_by_client", e.target.checked)} style={{width:15,height:15,cursor:"pointer"}}/>
+            <label htmlFor={"confirmed_"+active.id} style={{fontSize:12,color:c.textSub,cursor:"pointer"}}>고객이 내용을 확인함</label>
           </div>
           <div style={{marginBottom:12}}>
             <div style={{fontSize:12,color:c.textSub,marginBottom:6,fontWeight:600}}>첨부 파일</div>
@@ -2310,6 +2374,36 @@ function Customers({ team, setTeam, user, onGoConsulting }){
 }
 
 /* ─── BRIEFING ─── */
+
+// 태그 입력 헬퍼 (must_have / should_have / out_of_scope)
+function TagInput({ label, items, onChange, c, placeholder }) {
+  const [input, setInput] = React.useState("");
+  function addItem() {
+    if (!input.trim()) return;
+    onChange([...(items||[]), input.trim()]);
+    setInput("");
+  }
+  return (
+    <div style={{marginBottom:14}}>
+      <div style={{fontSize:12,fontWeight:600,color:c.textSub,marginBottom:6}}>{label}</div>
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
+        {(items||[]).map(function(item, i) {
+          return (
+            <span key={i} style={{padding:"3px 10px",borderRadius:14,background:c.brandLight,border:"1px solid "+c.brand+"44",fontSize:12,color:c.brand,display:"flex",alignItems:"center",gap:5}}>
+              {item}
+              <button onClick={() => onChange((items||[]).filter(function(_,j){return j!==i;}))} style={{background:"none",border:"none",cursor:"pointer",color:c.brand,padding:0,fontSize:14,lineHeight:1}}>×</button>
+            </span>
+          );
+        })}
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if(e.key==="Enter"){e.preventDefault();addItem();} }} placeholder={placeholder||"항목 입력 후 Enter"} style={{flex:1,padding:"8px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none"}}/>
+        <button onClick={addItem} style={{padding:"8px 12px",borderRadius:8,border:"1.5px solid "+c.brand,background:c.brandLight,color:c.brand,fontSize:12,cursor:"pointer",fontWeight:600}}>추가</button>
+      </div>
+    </div>
+  );
+}
+
 const BRIEFING_SYSTEM = `미팅 사전 브리핑 에이전트입니다.
 ## 한줄 니즈 요약
 ## 산업 구조 & 프로덕트 트렌드
@@ -2326,6 +2420,36 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
   const [viewingEntry, setViewingEntry] = useState(null);
   const [rmMemo, setRmMemo] = useState(project?.rm_memo || "");
   const [copied, setCopied] = useState(false);
+  const [showStructured, setShowStructured] = useState(false);
+  const [savingStr, setSavingStr] = useState(false);
+  const [str, setStr] = useState(function() {
+    return project?.briefing_structured || {
+      project_name: project?.title || "",
+      project_background: "",
+      project_goal: "",
+      must_have: [],
+      should_have: [],
+      out_of_scope: [],
+      timeline: "",
+      budget_range: "",
+      tech_constraints: "",
+      decision_maker: customer?.contact_name || "",
+      contact_person: "",
+      stakeholders: "",
+      known_unknowns: "",
+      our_assumptions: "",
+      previous_attempts: "",
+    };
+  });
+  function updStr(k, v) { setStr(function(p) { return {...p, [k]: v}; }); }
+
+  async function saveStructured() {
+    setSavingStr(true);
+    const updated = {...project, briefing_structured: str};
+    const saved = await updateProject(project.id, updated);
+    onUpdate(saved);
+    setSavingStr(false);
+  }
 
   async function generate(){
     setGenerating(true);
@@ -2333,12 +2457,22 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
       // REQ-PROJECT-001: 프로젝트 노트 사용
       const notesRes = await fetch(`/api/notes/project/${project.id}`);
       const notes = notesRes.ok ? await notesRes.json() : [];
-      const notesText = notes.length > 0 ? notes.map((n, idx) => "["+(idx+1)+"차 "+n.date+"]\n"+(n.content||"")).join("\n---\n") : "상담 기록 없음";
+      const notesText = notes.length > 0 ? notes.map(function(n, idx) {
+        var parts = ["["+(idx+1)+"차 "+n.date+"]"];
+        if (n.summary) parts.push("요약: "+n.summary);
+        if (n.content) parts.push(n.content);
+        if (n.client_requests) parts.push("요청: "+n.client_requests);
+        if (n.concerns) parts.push("우려: "+n.concerns);
+        return parts.join("\n");
+      }).join("\n---\n") : "상담 기록 없음";
       // REQ-CONSULTING-004: 맥락 변화 포함
       const prevEntry = history[history.length-1];
       const contextChanges = prevEntry?.context_changes?.map(ch => ch.note).join("; ") || "";
+      // 구조화 브리핑 포함
+      const strData = project.briefing_structured;
+      const strBlock = strData ? "\n\n[요구사항 정리]\n"+JSON.stringify(strData, null, 2) : "";
       const userMsg = "회사: "+customer.company+"\n산업: "+(customer.industry||"")+"\n도메인: "+(customer.domain||"")+
-        (contextChanges ? "\n\n[맥락 변화 기록]\n"+contextChanges : "")+"\n\n상담:\n"+notesText;
+        (contextChanges ? "\n\n[맥락 변화 기록]\n"+contextChanges : "")+strBlock+"\n\n상담:\n"+notesText;
       const text = await callClaude(BRIEFING_SYSTEM, userMsg, 3000);
       const newEntry = {version: history.length + 1, text, timestamp: new Date().toISOString(), noteCount: notes.length};
       const newHistory = [...history, newEntry];
@@ -2373,8 +2507,57 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
           <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>{project.title}</div>
           <div style={{fontSize:12,color:c.textSub}}>{customer.company} · {customer.industry}{customer.domain?" / "+customer.domain:""}</div>
         </div>
-        <Btn onClick={generate} c={c} disabled={generating}>{generating ? "생성 중..." : (briefing ? "재생성" : "브리핑 생성")}</Btn>
+        <div style={{display:"flex",gap:8}}>
+          <Btn onClick={() => setShowStructured(function(p){return !p;})} variant="ghost" c={c}>{showStructured?"요구사항 닫기":"요구사항 정리"}</Btn>
+          <Btn onClick={generate} c={c} disabled={generating}>{generating ? "생성 중..." : (briefing ? "재생성" : "브리핑 생성")}</Btn>
+        </div>
       </div>
+
+      {showStructured && (
+        <div style={{marginBottom:16,borderRadius:12,border:"1.5px solid "+c.brand+"44",overflow:"hidden"}}>
+          <div style={{padding:"10px 16px",background:c.brandLight,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span style={{fontSize:13,fontWeight:700,color:c.brand}}>요구사항 정리</span>
+            <Btn onClick={saveStructured} c={c} disabled={savingStr} style={{padding:"5px 14px",fontSize:12}}>{savingStr?"저장 중...":"저장"}</Btn>
+          </div>
+          <div style={{padding:16}}>
+            {/* 프로젝트 개요 */}
+            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>프로젝트 개요</div>
+            <div style={{display:"grid",gap:10,marginBottom:16}}>
+              <Inp label="프로젝트명" value={str.project_name||""} onChange={v => updStr("project_name",v)} c={c}/>
+              <Inp label="배경 (왜 이 프로젝트를 하는가)" value={str.project_background||""} onChange={v => updStr("project_background",v)} c={c}/>
+              <Inp label="목표 (프로젝트 후 달라져야 할 것)" value={str.project_goal||""} onChange={v => updStr("project_goal",v)} c={c}/>
+            </div>
+            {/* 요구사항 */}
+            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>요구사항</div>
+            <div style={{marginBottom:16}}>
+              <TagInput label="Must Have (반드시 필요)" items={str.must_have||[]} onChange={v => updStr("must_have",v)} c={c} placeholder="핵심 필수 항목 입력 후 Enter"/>
+              <TagInput label="Should Have (있으면 좋음)" items={str.should_have||[]} onChange={v => updStr("should_have",v)} c={c} placeholder="희망 항목 입력 후 Enter"/>
+              <TagInput label="Out of Scope (이번에 하지 않는 것)" items={str.out_of_scope||[]} onChange={v => updStr("out_of_scope",v)} c={c} placeholder="제외 항목 입력 후 Enter"/>
+            </div>
+            {/* 제약 조건 */}
+            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>제약 조건</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:16}}>
+              <Inp label="기대 일정" value={str.timeline||""} onChange={v => updStr("timeline",v)} c={c}/>
+              <Inp label="예산 범위" value={str.budget_range||""} onChange={v => updStr("budget_range",v)} c={c}/>
+              <Inp label="기술 제약" value={str.tech_constraints||""} onChange={v => updStr("tech_constraints",v)} c={c}/>
+            </div>
+            {/* 이해관계자 */}
+            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>이해관계자</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
+              <Inp label="최종 의사결정권자" value={str.decision_maker||""} onChange={v => updStr("decision_maker",v)} c={c}/>
+              <Inp label="실무 담당자" value={str.contact_person||""} onChange={v => updStr("contact_person",v)} c={c}/>
+              <Inp label="기타 이해관계자" value={str.stakeholders||""} onChange={v => updStr("stakeholders",v)} c={c}/>
+            </div>
+            {/* 불확실한 것 */}
+            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>불확실한 것</div>
+            <div style={{display:"grid",gap:10}}>
+              <Inp label="고객 스스로 모른다고 한 것" value={str.known_unknowns||""} onChange={v => updStr("known_unknowns",v)} c={c}/>
+              <Inp label="RM 추정 (확인 필요)" value={str.our_assumptions||""} onChange={v => updStr("our_assumptions",v)} c={c}/>
+              <Inp label="이미 시도한 것" value={str.previous_attempts||""} onChange={v => updStr("previous_attempts",v)} c={c}/>
+            </div>
+          </div>
+        </div>
+      )}
       {generating && (
         <Card c={c} style={{marginBottom:14,padding:"16px 20px"}}>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
@@ -2482,6 +2665,207 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
 }
 
 /* ─── CONSULTING ─── */
+// REQ-CONSULTING-006: RFP 생성·편집 컴포넌트
+function ConsultRfp({ project, customer, onBack, onUpdate }) {
+  const { c } = useTheme();
+  const [rfp, setRfp] = useState(project?.rfp || null);
+  const [generating, setGenerating] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function generate() {
+    setGenerating(true);
+    try {
+      const notesRes = await fetch("/api/notes/project/"+project.id);
+      const notes = notesRes.ok ? await notesRes.json() : [];
+      const notesJson = JSON.stringify(notes.map(function(n) {
+        return { date: n.date, type: n.type, summary: n.summary, content: n.content, client_requests: n.client_requests, concerns: n.concerns };
+      }));
+      const strData = project.briefing_structured || {};
+      const briefingJson = JSON.stringify(strData);
+      const userMsg = "[브리핑 데이터]\n"+briefingJson+"\n\n[상담 노트]\n"+notesJson;
+      const raw = await callClaude(RFP_SYSTEM, userMsg, 4000);
+      const mt = raw.match(/\{[\s\S]*\}/);
+      if (!mt) throw new Error("JSON 파싱 실패");
+      const parsed = JSON.parse(mt[0]);
+      setRfp(parsed);
+      const updated = {...project, rfp: parsed};
+      const saved = await updateProject(project.id, updated);
+      onUpdate(saved);
+    } catch(e) { alert("RFP 생성 오류: "+e.message); }
+    setGenerating(false);
+  }
+
+  async function saveRfp(updated) {
+    setSaving(true);
+    setRfp(updated);
+    const proj = {...project, rfp: updated};
+    const saved = await updateProject(project.id, proj);
+    onUpdate(saved);
+    setSaving(false);
+  }
+
+  function updRfp(key, val) { setRfp(function(p) { return {...p, [key]: val}; }); }
+
+  const sourceBadge = function(src) {
+    if (!src) return null;
+    var bg = src.includes("브리핑") ? "#1971C2" : src.includes("노트") ? "#2F9E44" : "#E67700";
+    return <span style={{padding:"2px 7px",borderRadius:10,fontSize:10,fontWeight:700,color:"#fff",background:bg,marginLeft:6}}>{src}</span>;
+  };
+
+  const iSt = {width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",boxSizing:"border-box"};
+  const taSt = {...iSt, resize:"vertical"};
+
+  return (
+    <div>
+      <BackBtn onClick={onBack}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16,flexWrap:"wrap",gap:12}}>
+        <div>
+          <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>RFP</div>
+          <div style={{fontSize:12,color:c.textSub}}>{project.title} · {customer.company}</div>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          {rfp && <Btn onClick={() => saveRfp(rfp)} c={c} disabled={saving} variant="ghost" style={{fontSize:12}}>{saving?"저장 중...":"저장"}</Btn>}
+          <Btn onClick={generate} c={c} disabled={generating}>{generating?"생성 중...":(rfp?"재생성":"RFP 생성")}</Btn>
+        </div>
+      </div>
+
+      {!rfp && !generating && (
+        <div style={{padding:"48px 0",textAlign:"center",color:c.textHint}}>
+          <div style={{fontSize:28,marginBottom:12}}>📄</div>
+          <div style={{fontSize:14,fontWeight:600,color:c.text,marginBottom:6}}>RFP 초안을 생성하세요</div>
+          <div style={{fontSize:12,color:c.textSub}}>요구사항 정리와 상담 노트를 바탕으로 AI가 RFP를 작성합니다</div>
+        </div>
+      )}
+      {generating && <div style={{padding:"32px 0",textAlign:"center",color:c.textSub,fontSize:13}}>AI가 RFP를 작성 중입니다...</div>}
+
+      {rfp && !generating && (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+          {/* 문제/목표 */}
+          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>문제 & 목표</div>
+            <div style={{padding:16,display:"grid",gap:12}}>
+              <div>
+                <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>핵심 문제</div>
+                <textarea value={rfp.problem_statement||""} onChange={e => updRfp("problem_statement",e.target.value)} rows={2} style={taSt}/>
+              </div>
+              <div>
+                <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>목표 (Outcome)</div>
+                <textarea value={rfp.goal_statement||""} onChange={e => updRfp("goal_statement",e.target.value)} rows={2} style={taSt}/>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                <div>
+                  <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>현재 상태</div>
+                  <textarea value={rfp.current_state||""} onChange={e => updRfp("current_state",e.target.value)} rows={2} style={taSt}/>
+                </div>
+                <div>
+                  <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>목표 상태</div>
+                  <textarea value={rfp.target_state||""} onChange={e => updRfp("target_state",e.target.value)} rows={2} style={taSt}/>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 미확인 질문 — 강조 */}
+          {rfp.unknown_questions && rfp.unknown_questions.length > 0 && (
+            <div style={{borderRadius:12,border:"2px solid #E67700",overflow:"hidden",background:"rgba(230,119,0,0.04)"}}>
+              <div style={{padding:"10px 16px",background:"rgba(230,119,0,0.1)",fontSize:12,fontWeight:700,color:"#E67700"}}>⚠ 고객에게 확인해야 할 미결 질문 ({rfp.unknown_questions.length}건)</div>
+              <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:6}}>
+                {rfp.unknown_questions.map(function(q, i) {
+                  return (
+                    <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                      <span style={{minWidth:18,height:18,borderRadius:9,background:"#E67700",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{i+1}</span>
+                      <input value={q} onChange={function(e){ var arr=[].concat(rfp.unknown_questions); arr[i]=e.target.value; updRfp("unknown_questions",arr); }} style={{...iSt,flex:1}}/>
+                      <button onClick={function(){ updRfp("unknown_questions",rfp.unknown_questions.filter(function(_,j){return j!==i;})); }} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint,fontSize:16}}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 요구사항 */}
+          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>요구사항</div>
+            <div style={{padding:16}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#1971C2",marginBottom:8}}>Must Have</div>
+              {(rfp.must_have||[]).map(function(item, i) {
+                return (
+                  <div key={i} style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
+                    <span style={{fontSize:11,color:c.textSub,minWidth:16}}>▸</span>
+                    <input value={item.item||""} onChange={function(e){ var arr=rfp.must_have.map(function(x,j){return j===i?{...x,item:e.target.value}:x;}); updRfp("must_have",arr); }} placeholder="항목" style={{...iSt,flex:2}}/>
+                    <input value={item.reason||""} onChange={function(e){ var arr=rfp.must_have.map(function(x,j){return j===i?{...x,reason:e.target.value}:x;}); updRfp("must_have",arr); }} placeholder="이유" style={{...iSt,flex:3}}/>
+                  </div>
+                );
+              })}
+              <div style={{fontSize:11,fontWeight:700,color:"#2F9E44",marginBottom:8,marginTop:14}}>Should Have</div>
+              {(rfp.should_have||[]).map(function(item, i) {
+                return (
+                  <div key={i} style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
+                    <span style={{fontSize:11,color:c.textSub,minWidth:16}}>▸</span>
+                    <input value={item.item||""} onChange={function(e){ var arr=rfp.should_have.map(function(x,j){return j===i?{...x,item:e.target.value}:x;}); updRfp("should_have",arr); }} placeholder="항목" style={{...iSt,flex:2}}/>
+                    <select value={item.priority||"중"} onChange={function(e){ var arr=rfp.should_have.map(function(x,j){return j===i?{...x,priority:e.target.value}:x;}); updRfp("should_have",arr); }} style={{padding:"9px 8px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none"}}>
+                      {["상","중","하"].map(function(p){return <option key={p}>{p}</option>;})}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 알고 있는 것 / 추정 */}
+          {((rfp.known_facts||[]).length>0 || (rfp.assumptions||[]).length>0) && (
+            <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+              <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>알고 있는 것 & 추정</div>
+              <div style={{padding:16}}>
+                {(rfp.known_facts||[]).map(function(f, i) {
+                  return <div key={i} style={{fontSize:12,color:c.text,marginBottom:6,display:"flex",alignItems:"center"}}>{sourceBadge(f.source)}<span style={{marginLeft:8}}>{f.content}</span></div>;
+                })}
+                {(rfp.assumptions||[]).map(function(f, i) {
+                  return <div key={i} style={{fontSize:12,color:c.textSub,marginBottom:6,display:"flex",alignItems:"center"}}>{sourceBadge(f.source)}<span style={{marginLeft:8}}>{f.content}</span></div>;
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 제약 조건 */}
+          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>제약 조건</div>
+            <div style={{padding:16,display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              {[["timeline","일정"],["budget_range","예산"],["tech_constraints","기술 제약"],["org_constraints","조직 제약"]].map(function(pair) {
+                return (
+                  <div key={pair[0]}>
+                    <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>{pair[1]}</div>
+                    <textarea value={rfp[pair[0]]||""} onChange={function(e){ updRfp(pair[0],e.target.value); }} rows={2} style={taSt}/>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 성공 기준 */}
+          {(rfp.success_criteria||[]).length>0 && (
+            <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+              <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>성공 기준</div>
+              <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
+                {(rfp.success_criteria||[]).map(function(sc, i) {
+                  return (
+                    <div key={i} style={{padding:"10px 12px",borderRadius:8,background:c.bg2,border:"1px solid "+c.divider}}>
+                      <div style={{fontSize:12,fontWeight:600,color:c.text,marginBottom:4}}>{sc.metric}</div>
+                      <div style={{fontSize:11,color:c.textSub}}>목표: {sc.target} · 측정: {sc.measurement_method}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Consulting({ user, initialTarget, onConsumeTarget }){
   const { c } = useTheme();
   const [tab, setTab] = useState("브리핑");
@@ -2564,6 +2948,7 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
   // 프로젝트 선택 후 탭 콘텐츠
   if (selected && selectedProject) {
     if (tab === "브리핑") return <BriefingDetail project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>;
+    if (tab === "RFP") return <ConsultRfp project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>;
     if (tab === "회의록분석") return (
       <div>
         <BackBtn onClick={() => setSelectedProject(null)}/>
@@ -2604,7 +2989,7 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
       <div style={{fontSize:18,fontWeight:700,color:c.text,marginBottom:4}}>상담관리</div>
       <div style={{fontSize:13,color:c.textSub,marginBottom:20}}>AI 기반 상담 인텔리전스</div>
       <div style={{display:"flex",gap:0,borderBottom:"1px solid "+c.divider,marginBottom:24}}>
-        {["브리핑","회의록분석","팀빌딩"].map(t => (
+        {["브리핑","회의록분석","RFP","팀빌딩"].map(t => (
           <button key={t} onClick={() => { setTab(t); setSelected(null); setSelectedProject(null); }} style={{padding:"8px 16px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:tab===t?700:500,color:tab===t?c.brand:c.textSub,borderBottom:tab===t?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>{t}</button>
         ))}
       </div>
@@ -3373,7 +3758,7 @@ function Settings({ team, setTeam, currentUser, perms, setPerms }){
 
 // ─── 외부 노출 (named re-exports for crm_rm_v2 components/) ──────────────
 export { AlertBell, Dashboard, Customers, Consulting, Contract, Workers, Settings,
-         TeamBuildingDetail, BriefingDetail, ConsultNotes,
+         TeamBuildingDetail, BriefingDetail, ConsultNotes, ConsultRfp, TagInput,
          CategoriesPanel, RevisionPatternsPanel, DataExportPanel,
          ProposalEditForm, ProposalPreview, VariantEditor, VariantCard,
          ModeSelectDialog, HoursReviewModal, RevisionReasonDialog,
