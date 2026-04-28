@@ -1702,6 +1702,7 @@ const RFP_SYSTEM = `당신은 IT 프로젝트 RFP 작성 전문가입니다.
   "goal_statement": "목표 (outcome 중심)",
   "current_state": "현재 상태",
   "target_state": "목표 상태",
+  "scope_of_work": ["수행할 업무 항목 1", "수행할 업무 항목 2"],
   "out_of_scope": ["제외항목"],
   "known_facts": [{"content": "사실", "source": "브리핑 v1"}],
   "assumptions": [{"content": "추정", "source": "추정"}],
@@ -2761,6 +2762,28 @@ function ConsultRfp({ project, customer, onBack, onUpdate }) {
                   <textarea value={rfp.target_state||""} onChange={e => updRfp("target_state",e.target.value)} rows={2} style={taSt}/>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* 업무 범위 */}
+          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+            <div style={{padding:"10px 16px",background:c.bg2,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,fontWeight:700,color:c.text}}>업무 범위 (Scope of Work)</span>
+              <button onClick={function(){ updRfp("scope_of_work",(rfp.scope_of_work||[]).concat([""])); }} style={{padding:"3px 10px",borderRadius:6,border:"1.5px solid "+c.brand,background:c.brandLight,color:c.brand,fontSize:11,fontWeight:600,cursor:"pointer"}}>+ 항목 추가</button>
+            </div>
+            <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:6}}>
+              {(rfp.scope_of_work||[]).length === 0 && (
+                <div style={{fontSize:12,color:c.textHint,textAlign:"center",padding:"8px 0"}}>항목을 추가하거나 RFP를 재생성하세요</div>
+              )}
+              {(rfp.scope_of_work||[]).map(function(item, i) {
+                return (
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <span style={{fontSize:13,color:c.textSub,minWidth:14}}>▸</span>
+                    <input value={item} onChange={function(e){ var arr=[].concat(rfp.scope_of_work); arr[i]=e.target.value; updRfp("scope_of_work",arr); }} style={{...iSt,flex:1}}/>
+                    <button onClick={function(){ updRfp("scope_of_work",(rfp.scope_of_work||[]).filter(function(_,j){return j!==i;})); }} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint,fontSize:16}}>×</button>
+                  </div>
+                );
+              })}
             </div>
           </div>
 
