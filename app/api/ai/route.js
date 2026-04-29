@@ -43,26 +43,38 @@ export async function POST(req) {
   }
   content.push({ type: "text", text: userMsg || "" });
 
+  const { useWebSearch = false } = body;
+
+  const reqHeaders = {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+  };
+  if (useWebSearch) reqHeaders["anthropic-beta"] = "web-search-2025-03-05";
+
+  const reqBody = {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: maxTokens,
+    system: system || "",
+    messages: [{ role: "user", content }],
+  };
+  if (useWebSearch) {
+    reqBody.tools = [{ type: "web_search_20250305", name: "web_search" }];
+  }
+
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: maxTokens,
-        system: system || "",
-        messages: [{ role: "user", content }],
-      }),
+      headers: reqHeaders,
+      body: JSON.stringify(reqBody),
     });
     const data = await res.json();
     if (!res.ok) {
       return NextResponse.json({ error: data.error?.message || "AI call failed", raw: data }, { status: res.status });
     }
-    const text = data.content && data.content[0] ? data.content[0].text : "";
+    // web_search 사용 시 tool_result/text 블록 혼재 → text 블록만 추출 합산
+    const textParts = (data.content || []).filter(b => b.type === "text").map(b => b.text);
+    const text = textParts.join("\n\n") || "";
     return NextResponse.json({ text });
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 500 });

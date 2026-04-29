@@ -1854,7 +1854,7 @@ function ProjectList({ customer, projects, loading, c, onSelectProject, onCreate
   );
 }
 
-function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDriftNewProject, onContextChanged }){
+function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDriftNewProject, onContextChanged, onRequirementsContribute }){
   const { c } = useTheme();
   const [notes, setNotes] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -1948,6 +1948,28 @@ function ConsultNotes({ projectId, customerId, projectTitle, onExtracted, onDrif
           if (Object.keys(filtered).length > 0) setExtractedInfo(filtered);
         }
       } catch(e){}
+      // P-002: 상담 기록 분석 시 브리핑 미참조 — 상담 내용만 사용
+      // 요구사항 자동 기여 (신뢰도 높음 — 상담 출처)
+      if (onRequirementsContribute) {
+        try {
+          var REQ_EXTRACT = `상담 기록에서 요구사항을 추출해 JSON으로만 반환하세요.\n{"confirmed_requirements":[{"feature":"기능명","priority":"must_have|should_have","tech":""}],"missing_info":["미결1"],"risk_signals":["리스크1"]}`;
+          var reqText = await callClaude(REQ_EXTRACT, userMsg, 1000, atts);
+          var rm = reqText.match(/\{[\s\S]*\}/);
+          if (rm) {
+            var reqParsed = JSON.parse(rm[0]);
+            var noteDate = note.date || new Date().toISOString().slice(0,10);
+            var seq = note.seq || 1;
+            var sourceLabel = seq + "차 상담 " + noteDate;
+            var items = Array.isArray(reqParsed.confirmed_requirements) ? reqParsed.confirmed_requirements : [];
+            if (items.length > 0) {
+              onRequirementsContribute({
+                items: items.map(function(item) { return { id: "req_" + Date.now() + "_" + Math.random().toString(36).slice(2,6), feature: item.feature, source: sourceLabel, confidence: "high", status: "AI추론", rm_memo: null, phase: 1, priority: item.priority || "must_have" }; }),
+                openQuestions: (reqParsed.missing_info||[]).map(function(q) { return { question: q, source: sourceLabel }; }),
+              });
+            }
+          }
+        } catch(e){ console.warn("요구사항 추출:", e.message); }
+      }
       // REQ-CONSULTING-003: 맥락 이탈 감지 (프로젝트 모드에서만)
       const driftContent = [note.summary, note.content].filter(Boolean).join("\n");
       if (projectId && driftContent) {
@@ -2465,13 +2487,44 @@ RM이 고객과 나눈 상담 노트와 고객 정보를 분석하여 요구사�
   "previous_attempts": "고객이 이미 시도했거나 검토한 솔루션/방법. 없으면 '없음 (확인 필요)'"
 }`;
 
-const BRIEFING_SYSTEM = `미팅 사전 브리핑 에이전트입니다.
-## 한줄 니즈 요약
-## 산업 구조 & 프로덕트 트렌드
-## IT 팀 세팅 예시
-## IT 주요 체크포인트
-## 심층 질문셋
-## RM 한줄 정리`;
+// P-001: 브리핑 생성 시 상담 노트 미사용. 브리핑은 "상담 전 예측 문서"
+// 웹검색 기반 회사 리서치 + 고객 기본 정보만 사용
+const BRIEFING_SYSTEM = `당신은 GRIDGE RM의 사전 미팅 브리핑 에이전트입니다.
+입력된 고객 기본 정보와 RM 사전 입력만 사용해 브리핑을 작성하세요.
+상담 기록은 절대 참조하지 않습니다 (상담 전 예측 문서이기 때문).
+
+아래 7개 섹션을 마크다운으로 작성하세요:
+
+## 요약 3줄
+**상황:** [고객 현재 상황 1줄]
+**진짜 니즈:** [말한 것과 실제 원하는 것의 차이 1줄]
+**핵심 리스크:** [계약을 막을 가장 큰 요인 1줄]
+
+## 회사 브리핑
+[웹 검색 결과로 확인된 사업 내용 2줄. 검색 결과 없으면 이 섹션 생략]
+
+## 예측 니즈
+- **말한 것:** [표면 요청]
+- **실제 원하는 것:** [심층 동기]
+- **놓치면 안 되는 포인트:** [핵심 1가지]
+
+## 이탈 리스크 진단
+**레벨:** [높음/중간/낮음] — [근거]
+- [시나리오 1]
+- [시나리오 2]
+
+## 미팅 전 확인사항
+1. [확인사항]
+2. [확인사항]
+
+## 미팅 질문셋
+**[상황]** "[실제 대화에서 쓸 수 있는 질문]"
+
+## 팀 구성 힌트
+**추천:** [포지션] [등급] × [인원] — [이유]
+
+## RM Next Step
+[계약 가능성·경쟁사·특이사항 종합 다음 액션 2~3줄]`;
 
 function BriefingDetail({ project, customer, onBack, onUpdate }){
   const { c } = useTheme();
@@ -2481,116 +2534,55 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
   const [viewingEntry, setViewingEntry] = useState(null);
   const [rmMemo, setRmMemo] = useState(project?.rm_memo || "");
   const [copied, setCopied] = useState(false);
-  const [showStructured, setShowStructured] = useState(false);
-  const [savingStr, setSavingStr] = useState(false);
-  const [str, setStr] = useState(function() {
-    return project?.briefing_structured || {
-      project_name: project?.title || "",
-      project_background: "",
-      project_goal: "",
-      must_have: [],
-      should_have: [],
-      out_of_scope: [],
-      timeline: "",
-      budget_range: "",
-      tech_constraints: "",
-      decision_maker: customer?.contact_name || "",
-      contact_person: "",
-      stakeholders: "",
-      known_unknowns: "",
-      our_assumptions: "",
-      previous_attempts: "",
-    };
-  });
-  const [autoFilling, setAutoFilling] = useState(false);
-  function updStr(k, v) { setStr(function(p) { return {...p, [k]: v}; }); }
+  // RM 사전 입력 (브리핑 품질 향상)
+  const [probability, setProbability] = useState(project?.briefing_pre?.probability || "워밍업");
+  const [competitor, setCompetitor] = useState(project?.briefing_pre?.competitor || "");
+  const [preNote, setPreNote] = useState(project?.briefing_pre?.note || "");
 
-  async function autoFill() {
-    setAutoFilling(true);
-    try {
-      const notesRes = await fetch("/api/notes/project/"+project.id);
-      const notesRaw = notesRes.ok ? await notesRes.json() : [];
-      const notes = Array.isArray(notesRaw) ? notesRaw : [];
-      const notesText = notes.length > 0 ? notes.map(function(n, idx) {
-        var parts = ["["+(idx+1)+"차 "+(n.date||"")+"]"];
-        if (n.type) parts.push("유형: "+n.type);
-        if (n.summary) parts.push("요약: "+n.summary);
-        if (n.content) parts.push("내용: "+n.content);
-        if (n.client_requests) parts.push("고객 요청: "+n.client_requests);
-        if (n.concerns) parts.push("우려사항: "+n.concerns);
-        if (n.next_action) parts.push("다음 액션: "+n.next_action);
-        return parts.join("\n");
-      }).join("\n---\n") : "상담 기록 없음";
-      var userMsg = "[고객 정보]\n회사: "+(customer.company||"")+"\n산업: "+(customer.industry||"")+"\n도메인: "+(customer.domain||"")+"\n프로젝트: "+project.title+"\n\n[상담 노트]\n"+notesText;
-      var raw = await callClaude(STRUCTURED_SYSTEM, userMsg, 3000);
-      var mt = raw.match(/\{[\s\S]*\}/);
-      if (!mt) throw new Error("JSON 파싱 실패");
-      var parsed = JSON.parse(mt[0]);
-      var filled = {
-        project_name: parsed.project_name || str.project_name,
-        project_background: parsed.project_background || str.project_background,
-        project_goal: parsed.project_goal || str.project_goal,
-        must_have: Array.isArray(parsed.must_have) ? parsed.must_have : str.must_have,
-        should_have: Array.isArray(parsed.should_have) ? parsed.should_have : str.should_have,
-        out_of_scope: Array.isArray(parsed.out_of_scope) ? parsed.out_of_scope : str.out_of_scope,
-        timeline: parsed.timeline || str.timeline,
-        budget_range: parsed.budget_range || str.budget_range,
-        tech_constraints: parsed.tech_constraints || str.tech_constraints,
-        decision_maker: parsed.decision_maker || str.decision_maker,
-        contact_person: parsed.contact_person || str.contact_person,
-        stakeholders: parsed.stakeholders || str.stakeholders,
-        known_unknowns: parsed.known_unknowns || str.known_unknowns,
-        our_assumptions: parsed.our_assumptions || str.our_assumptions,
-        previous_attempts: parsed.previous_attempts || str.previous_attempts,
-      };
-      setStr(filled);
-      // 자동 정리 완료 즉시 저장
-      const savedProj = await updateProject(project.id, Object.assign({}, project, {briefing_structured: filled}));
-      onUpdate(savedProj);
-    } catch(e) { alert("AI 자동 정리 오류: "+e.message); }
-    setAutoFilling(false);
-  }
-
-  async function saveStructured() {
-    setSavingStr(true);
-    const updated = Object.assign({}, project, {briefing_structured: str});
-    const saved = await updateProject(project.id, updated);
-    onUpdate(saved);
-    setSavingStr(false);
-  }
-
+  // P-001: 브리핑 생성 시 상담 노트 미참조 (재생성도 동일)
+  // 고객 기본 정보 + RM 사전 입력 + 웹검색만 사용
   async function generate(){
     setGenerating(true);
     try {
-      // REQ-PROJECT-001: 프로젝트 노트 사용
-      const notesRes = await fetch("/api/notes/project/"+project.id);
-      const notesRaw = notesRes.ok ? await notesRes.json() : [];
-      const notes = Array.isArray(notesRaw) ? notesRaw : [];
-      const notesText = notes.length > 0 ? notes.map(function(n, idx) {
-        var parts = ["["+(idx+1)+"차 "+n.date+"]"];
-        if (n.summary) parts.push("요약: "+n.summary);
-        if (n.content) parts.push(n.content);
-        if (n.client_requests) parts.push("요청: "+n.client_requests);
-        if (n.concerns) parts.push("우려: "+n.concerns);
-        return parts.join("\n");
-      }).join("\n---\n") : "상담 기록 없음";
-      // REQ-CONSULTING-004: 맥락 변화 포함
-      const prevEntry = history[history.length-1];
-      const contextChanges = prevEntry?.context_changes?.map(ch => ch.note).join("; ") || "";
-      // 구조화 브리핑 포함
-      const strData = project.briefing_structured;
-      const strBlock = strData ? "\n\n[요구사항 정리]\n"+JSON.stringify(strData, null, 2) : "";
-      const userMsg = "회사: "+customer.company+"\n산업: "+(customer.industry||"")+"\n도메인: "+(customer.domain||"")+
-        (contextChanges ? "\n\n[맥락 변화 기록]\n"+contextChanges : "")+strBlock+"\n\n상담:\n"+notesText;
-      const text = await callClaude(BRIEFING_SYSTEM, userMsg, 3000);
-      const newEntry = {version: history.length + 1, text, timestamp: new Date().toISOString(), noteCount: notes.length};
+      // RM 사전 입력 저장
+      const pre = { probability, competitor, note: preNote };
+      const userMsg = "[고객 기본 정보]\n" +
+        "회사: " + (customer.company || "") + "\n" +
+        "산업: " + (customer.industry || "") + "\n" +
+        "도메인: " + (customer.domain || "") + "\n" +
+        "웹사이트: " + (customer.website || "정보 없음") + "\n" +
+        "프로젝트: " + project.title + "\n" +
+        "예산: " + (customer.budget || "미정") + "\n\n" +
+        "[RM 사전 입력]\n" +
+        "계약 가능성 체감: " + probability + "\n" +
+        "경쟁사 언급: " + (competitor || "없음") + "\n" +
+        "특이사항: " + (preNote || "없음");
+
+      // 웹검색 기반 브리핑 생성
+      const text = await callClaude(BRIEFING_SYSTEM, userMsg, 3000, [], { useWebSearch: true });
+      const newEntry = { version: history.length + 1, text, timestamp: new Date().toISOString() };
       const newHistory = history.concat([newEntry]);
       setHistory(newHistory);
       setBriefing(text); setViewingEntry(null);
-      const updatedProject = Object.assign({}, project, {briefing: text, briefing_history: newHistory});
+
+      // 브리핑 → 요구사항 자동 기여 (신뢰도 낮음)
+      const existingReqs = project.requirements || { must_have:[], should_have:[], nice_to_have:[], tech_spec:{}, team_hints:[], open_questions:[] };
+      const versionLabel = "브리핑 v" + newEntry.version;
+      // 팀 구성 힌트 추출 (간단한 패턴 매칭)
+      const hintMatch = text.match(/## 팀 구성 힌트[\s\S]*?(?=##|$)/);
+      if (hintMatch) {
+        const hintText = hintMatch[0];
+        const hint = { position: "브리핑 힌트", reason: hintText.replace(/## 팀 구성 힌트\n?/,"").trim().slice(0,120), source: versionLabel };
+        existingReqs.team_hints = (existingReqs.team_hints || []).concat([hint]);
+      }
+
+      const updatedProject = Object.assign({}, project, {
+        briefing: text, briefing_history: newHistory,
+        briefing_pre: pre, requirements: existingReqs,
+      });
       const saved = await updateProject(project.id, updatedProject);
       onUpdate(saved);
-    } catch(e){ alert("브리핑 생성 오류: "+e.message); }
+    } catch(e){ alert("브리핑 생성 오류: " + e.message); }
     setGenerating(false);
   }
 
@@ -2616,68 +2608,42 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
           <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>{project.title}</div>
           <div style={{fontSize:12,color:c.textSub}}>{customer.company} · {customer.industry}{customer.domain?" / "+customer.domain:""}</div>
         </div>
-        <div style={{display:"flex",gap:8}}>
-          <Btn onClick={() => setShowStructured(function(p){return !p;})} variant="ghost" c={c}>{showStructured?"요구사항 닫기":"요구사항 정리"}</Btn>
-          <Btn onClick={generate} c={c} disabled={generating}>{generating ? "생성 중..." : (briefing ? "재생성" : "브리핑 생성")}</Btn>
-        </div>
+        <Btn onClick={generate} c={c} disabled={generating}>{generating ? "생성 중..." : (briefing ? "재생성" : "브리핑 생성")}</Btn>
       </div>
 
-      {showStructured && (
-        <div style={{marginBottom:16,borderRadius:12,border:"1.5px solid "+c.brand+"44",overflow:"hidden"}}>
-          <div style={{padding:"10px 16px",background:c.brandLight,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span style={{fontSize:13,fontWeight:700,color:c.brand}}>요구사항 정리</span>
-            <div style={{display:"flex",gap:8,alignItems:"center"}}>
-              {autoFilling && <span style={{fontSize:11,color:c.brand,fontWeight:600}}>AI 분석 중...</span>}
-              <Btn onClick={autoFill} c={c} disabled={autoFilling} variant="ghost" style={{padding:"5px 14px",fontSize:12}}>AI 자동 정리</Btn>
-              <Btn onClick={saveStructured} c={c} disabled={savingStr} style={{padding:"5px 14px",fontSize:12}}>{savingStr?"저장 중...":"저장"}</Btn>
+      {/* RM 사전 입력 (P-001: 브리핑 품질 향상용 — 상담 노트 미사용) */}
+      <Card c={c} style={{marginBottom:14,padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>RM 사전 입력 (브리핑 품질 향상)</div>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-start"}}>
+          <div>
+            <div style={{fontSize:11,color:c.textSub,marginBottom:6,fontWeight:600}}>계약 가능성 체감</div>
+            <div style={{display:"flex",gap:6}}>
+              {["핫","워밍업","콜드"].map(p => (
+                <button key={p} onClick={() => setProbability(p)} style={{padding:"5px 12px",borderRadius:20,border:"1px solid "+(probability===p?c.brand:c.inputBorder),background:probability===p?c.brandLight:"transparent",color:probability===p?c.brand:c.textSub,fontSize:12,cursor:"pointer",fontWeight:probability===p?600:400}}>
+                  {p}
+                </button>
+              ))}
             </div>
           </div>
-          <div style={{padding:16}}>
-            {/* 프로젝트 개요 */}
-            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>프로젝트 개요</div>
-            <div style={{display:"grid",gap:10,marginBottom:16}}>
-              <Inp label="프로젝트명" value={str.project_name||""} onChange={v => updStr("project_name",v)} c={c}/>
-              <Inp label="배경 (왜 이 프로젝트를 하는가)" value={str.project_background||""} onChange={v => updStr("project_background",v)} c={c}/>
-              <Inp label="목표 (프로젝트 후 달라져야 할 것)" value={str.project_goal||""} onChange={v => updStr("project_goal",v)} c={c}/>
-            </div>
-            {/* 요구사항 */}
-            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>요구사항</div>
-            <div style={{marginBottom:16}}>
-              <TagInput label="Must Have (반드시 필요)" items={str.must_have||[]} onChange={v => updStr("must_have",v)} c={c} placeholder="핵심 필수 항목 입력 후 Enter"/>
-              <TagInput label="Should Have (있으면 좋음)" items={str.should_have||[]} onChange={v => updStr("should_have",v)} c={c} placeholder="희망 항목 입력 후 Enter"/>
-              <TagInput label="Out of Scope (이번에 하지 않는 것)" items={str.out_of_scope||[]} onChange={v => updStr("out_of_scope",v)} c={c} placeholder="제외 항목 입력 후 Enter"/>
-            </div>
-            {/* 제약 조건 */}
-            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>제약 조건</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:16}}>
-              <Inp label="기대 일정" value={str.timeline||""} onChange={v => updStr("timeline",v)} c={c}/>
-              <Inp label="예산 범위" value={str.budget_range||""} onChange={v => updStr("budget_range",v)} c={c}/>
-              <Inp label="기술 제약" value={str.tech_constraints||""} onChange={v => updStr("tech_constraints",v)} c={c}/>
-            </div>
-            {/* 이해관계자 */}
-            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>이해관계자</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:16}}>
-              <Inp label="최종 의사결정권자" value={str.decision_maker||""} onChange={v => updStr("decision_maker",v)} c={c}/>
-              <Inp label="실무 담당자" value={str.contact_person||""} onChange={v => updStr("contact_person",v)} c={c}/>
-              <Inp label="기타 이해관계자" value={str.stakeholders||""} onChange={v => updStr("stakeholders",v)} c={c}/>
-            </div>
-            {/* 불확실한 것 */}
-            <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>불확실한 것</div>
-            <div style={{display:"grid",gap:10}}>
-              <Inp label="고객 스스로 모른다고 한 것" value={str.known_unknowns||""} onChange={v => updStr("known_unknowns",v)} c={c}/>
-              <Inp label="RM 추정 (확인 필요)" value={str.our_assumptions||""} onChange={v => updStr("our_assumptions",v)} c={c}/>
-              <Inp label="이미 시도한 것" value={str.previous_attempts||""} onChange={v => updStr("previous_attempts",v)} c={c}/>
-            </div>
+          <div style={{flex:1,minWidth:160}}>
+            <div style={{fontSize:11,color:c.textSub,marginBottom:6,fontWeight:600}}>경쟁사 언급</div>
+            <input value={competitor} onChange={e => setCompetitor(e.target.value)} placeholder="없음 또는 업체명" style={{width:"100%",padding:"7px 10px",borderRadius:8,border:"1px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",boxSizing:"border-box"}}/>
+          </div>
+          <div style={{flex:2,minWidth:200}}>
+            <div style={{fontSize:11,color:c.textSub,marginBottom:6,fontWeight:600}}>특이사항 메모</div>
+            <input value={preNote} onChange={e => setPreNote(e.target.value)} placeholder="기타 알아두어야 할 사항" style={{width:"100%",padding:"7px 10px",borderRadius:8,border:"1px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",boxSizing:"border-box"}}/>
           </div>
         </div>
-      )}
+        <div style={{fontSize:10,color:c.textHint,marginTop:8}}>※ P-001: 브리핑은 "상담 전 예측 문서"입니다. 상담 기록은 참조하지 않습니다.</div>
+      </Card>
+
       {generating && (
         <Card c={c} style={{marginBottom:14,padding:"16px 20px"}}>
           <div style={{display:"flex",alignItems:"center",gap:12}}>
             <div style={{width:28,height:28,borderRadius:"50%",border:"3px solid "+c.brandLight,borderTopColor:c.brand,animation:"spin 1s linear infinite"}}/>
             <div>
               <div style={{fontSize:13,fontWeight:600,color:c.text}}>AI 브리핑 생성 중...</div>
-              <div style={{fontSize:11,color:c.textSub,marginTop:2}}>상담 기록을 분석하고 있어요</div>
+              <div style={{fontSize:11,color:c.textSub,marginTop:2}}>웹 검색 + 고객 정보 기반으로 분석하고 있어요</div>
             </div>
           </div>
         </Card>
@@ -2685,8 +2651,9 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
       {!briefing && !generating && (
         <Card c={c} style={{marginBottom:14,padding:36,textAlign:"center"}}>
           <div style={{fontSize:32,marginBottom:10}}>📋</div>
-          <div style={{fontSize:13,color:c.text,marginBottom:4,fontWeight:600}}>미팅 브리핑을 생성하세요</div>
-          <div style={{fontSize:11,color:c.textSub}}>상담 기록을 분석해 브리핑을 만들어드립니다.</div>
+          <div style={{fontSize:13,color:c.text,marginBottom:4,fontWeight:600}}>미팅 전 브리핑을 생성하세요</div>
+          <div style={{fontSize:11,color:c.textSub}}>웹 검색 기반으로 7개 섹션 브리핑을 만들어드립니다.</div>
+          <div style={{fontSize:10,color:c.textHint,marginTop:4}}>생성 완료 시 요구사항 탭에 자동 기여됩니다 (신뢰도 낮음)</div>
         </Card>
       )}
       {briefing && !generating && (
@@ -2777,71 +2744,284 @@ function BriefingDetail({ project, customer, onBack, onUpdate }){
   );
 }
 
-/* ─── CONSULTING ─── */
-// REQ-CONSULTING-006: RFP 생성·편집 컴포넌트
+/* ─── 요구사항 탭 (GRIDGE_RM_CRM_CONTEXT.md §7) ─── */
+// 브리핑 + 상담 기여분 자동 누적, 충돌 감지, RM확정, Phase 분리
+const NOTE_EXTRACT_SYSTEM = `당신은 GRIDGE RM의 상담 기록 분석 에이전트입니다.
+입력된 상담 기록을 분석해 아래 6개 항목을 반드시 JSON으로만 반환하세요.
+{
+  "keywords": ["키워드1","키워드2"],
+  "one_line_need": "한 줄 니즈",
+  "real_need": "실제 니즈 (추론)",
+  "confirmed_requirements": [{"feature":"기능명","priority":"must_have|should_have","tech":"기술스택 (있으면)"}],
+  "missing_info": ["더 파악해야 할 것1"],
+  "risk_signals": ["이탈·지연 가능성 시그널1"]
+}`;
+
+function RequirementsDetail({ project, onBack, onUpdate }) {
+  const { c } = useTheme();
+  const [reqs, setReqs] = useState(function() {
+    return project?.requirements || { must_have:[], should_have:[], nice_to_have:[], tech_spec:{platforms:[],stack:[],integrations:[]}, constraints:{}, open_questions:[], team_hints:[], version:1 };
+  });
+  const [editingId, setEditingId] = useState(null);
+  const [editMemo, setEditMemo] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [conflicts, setConflicts] = useState([]);
+
+  // 충돌 감지 (3가지 조건만)
+  useEffect(() => {
+    const found = [];
+    const allItems = (reqs.must_have||[]).concat(reqs.should_have||[]).concat(reqs.nice_to_have||[]);
+    // 1) 플랫폼 변경 감지
+    const briefingPlatforms = allItems.filter(i => i.source && i.source.includes("브리핑") && i.feature && /iOS|Android|웹|앱/.test(i.feature));
+    const notePlatforms = allItems.filter(i => i.source && !i.source.includes("브리핑") && i.feature && /iOS|Android|웹|앱/.test(i.feature));
+    if (briefingPlatforms.length > 0 && notePlatforms.length > 0) {
+      const bPl = briefingPlatforms.map(i => i.feature).join(", ");
+      const nPl = notePlatforms.map(i => i.feature).join(", ");
+      if (bPl !== nPl) found.push({ type: "platform", msg: "플랫폼 변경 감지: 브리핑(" + bPl + ") → 상담(" + nPl + ")" });
+    }
+    setConflicts(found);
+  }, [reqs]);
+
+  async function saveReqs(updated) {
+    setSaving(true);
+    const newReqs = Object.assign({}, updated, { version: (updated.version||1)+1 });
+    setReqs(newReqs);
+    const saved = await updateProject(project.id, Object.assign({}, project, { requirements: newReqs }));
+    onUpdate(saved);
+    setSaving(false);
+  }
+
+  function confirmItem(section, id) {
+    const updated = Object.assign({}, reqs);
+    updated[section] = (updated[section]||[]).map(i => i.id===id ? Object.assign({},i,{status:"RM확정"}) : i);
+    saveReqs(updated);
+  }
+
+  function saveMemo(section, id) {
+    const updated = Object.assign({}, reqs);
+    updated[section] = (updated[section]||[]).map(i => i.id===id ? Object.assign({},i,{rm_memo:editMemo}) : i);
+    setEditingId(null);
+    saveReqs(updated);
+  }
+
+  function deleteItem(section, id) {
+    const updated = Object.assign({}, reqs);
+    updated[section] = (updated[section]||[]).filter(i => i.id!==id);
+    saveReqs(updated);
+  }
+
+  function togglePhase(section, id) {
+    const updated = Object.assign({}, reqs);
+    updated[section] = (updated[section]||[]).map(i => i.id===id ? Object.assign({},i,{phase: i.phase===2?1:2}) : i);
+    saveReqs(updated);
+  }
+
+  const statusColor = { "AI추론": c.textHint, "충돌대기": c.warn, "RM확정": c.brand };
+  const confidenceLabel = { high: "높음", low: "낮음" };
+
+  function ItemRow({ item, section }) {
+    const isEditing = editingId === item.id;
+    return (
+      <div style={{padding:"10px 14px",borderBottom:"1px solid "+c.divider,display:"flex",gap:10,alignItems:"flex-start"}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",marginBottom:4}}>
+            <span style={{fontSize:13,color:c.text,fontWeight:500}}>{item.feature}</span>
+            {item.status==="RM확정" && <span style={{fontSize:9,padding:"1px 6px",borderRadius:4,background:c.brand,color:"#fff",fontWeight:700}}>RM확정</span>}
+            {item.status==="충돌대기" && <span style={{fontSize:9,padding:"1px 6px",borderRadius:4,background:c.warnCont||"rgba(255,185,80,0.15)",color:c.warn,fontWeight:700,border:"1px solid "+(c.warnCont||"rgba(255,185,80,0.3)")}}>충돌대기</span>}
+            {item.phase===2 && <span style={{fontSize:9,padding:"1px 6px",borderRadius:4,background:c.bg2,color:c.textSub,fontWeight:600}}>Phase 2</span>}
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            <span style={{fontSize:10,color:item.confidence==="high"?c.brand:c.textHint}}>신뢰도 {confidenceLabel[item.confidence]||"낮음"}</span>
+            {item.source && <span style={{fontSize:10,color:c.textSub}}>출처: {item.source}</span>}
+          </div>
+          {item.rm_memo && <div style={{fontSize:11,color:c.textSub,marginTop:4,padding:"4px 8px",background:c.bg2,borderRadius:4}}>RM 메모: {item.rm_memo}</div>}
+          {isEditing && (
+            <div style={{marginTop:8,display:"flex",gap:6}}>
+              <input autoFocus value={editMemo} onChange={e=>setEditMemo(e.target.value)} placeholder="RM 메모 (AI 해석과 별도)" style={{flex:1,padding:"6px 10px",borderRadius:6,border:"1px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none"}}/>
+              <button onClick={() => saveMemo(section,item.id)} style={{padding:"6px 12px",borderRadius:6,background:c.brand,border:"none",color:"#fff",fontSize:12,cursor:"pointer",fontWeight:600}}>저장</button>
+              <button onClick={() => setEditingId(null)} style={{padding:"6px 10px",borderRadius:6,background:"transparent",border:"1px solid "+c.inputBorder,color:c.textSub,fontSize:12,cursor:"pointer"}}>취소</button>
+            </div>
+          )}
+        </div>
+        <div style={{display:"flex",gap:4,flexShrink:0}}>
+          {item.status!=="RM확정" && (
+            <button onClick={() => confirmItem(section,item.id)} title="RM 확정" style={{padding:"4px 8px",borderRadius:5,border:"1px solid "+c.brand,background:c.brandLight,color:c.brand,fontSize:11,cursor:"pointer",fontWeight:600}}>확정</button>
+          )}
+          <button onClick={() => { setEditingId(item.id); setEditMemo(item.rm_memo||""); }} title="메모" style={{padding:"4px 7px",borderRadius:5,border:"1px solid "+c.inputBorder,background:"transparent",color:c.textSub,fontSize:11,cursor:"pointer"}}>메모</button>
+          <button onClick={() => togglePhase(section,item.id)} title="Phase 전환" style={{padding:"4px 7px",borderRadius:5,border:"1px solid "+c.inputBorder,background:"transparent",color:c.textSub,fontSize:11,cursor:"pointer"}}>{item.phase===2?"P1":"P2"}</button>
+          {item.status!=="RM확정" && <button onClick={() => deleteItem(section,item.id)} title="삭제" style={{padding:"4px 7px",borderRadius:5,border:"1px solid "+c.errorBorder||"rgba(242,184,181,0.28)",background:c.errorCont||"rgba(242,184,181,0.12)",color:c.error||"#F2B8B5",fontSize:11,cursor:"pointer"}}>✕</button>}
+        </div>
+      </div>
+    );
+  }
+
+  function Section({ title, items, sectionKey, badge, badgeColor }) {
+    if (!items || items.length === 0) return null;
+    return (
+      <div style={{marginBottom:16}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 14px",background:c.bg2,borderRadius:"8px 8px 0 0"}}>
+          <span style={{fontSize:12,fontWeight:700,color:c.text}}>{title}</span>
+          <span style={{fontSize:10,padding:"1px 7px",borderRadius:4,background:badgeColor||c.brandLight,color:badge?badgeColor||c.brand:c.textSub,fontWeight:600}}>{items.length}건</span>
+        </div>
+        <div style={{border:"1px solid "+c.divider,borderTop:"none",borderRadius:"0 0 8px 8px",overflow:"hidden"}}>
+          {items.map(item => <ItemRow key={item.id} item={item} section={sectionKey}/>)}
+        </div>
+      </div>
+    );
+  }
+
+  const allEmpty = (reqs.must_have||[]).length===0 && (reqs.should_have||[]).length===0 && (reqs.nice_to_have||[]).length===0;
+
+  return (
+    <div>
+      <BackBtn onClick={onBack}/>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+        <div>
+          <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>요구사항</div>
+          <div style={{fontSize:12,color:c.textSub}}>브리핑 + 상담 기여분 자동 누적 · RM확정 항목은 덮어쓰기 금지</div>
+        </div>
+        {saving && <span style={{fontSize:12,color:c.brand}}>저장 중...</span>}
+      </div>
+
+      {/* 충돌 알림 */}
+      {conflicts.length > 0 && (
+        <div style={{marginBottom:14,padding:"12px 16px",borderRadius:8,background:c.warnCont||"rgba(255,185,80,0.12)",border:"1px solid "+(c.warnBorder||"rgba(255,185,80,0.28)")}}>
+          <div style={{fontSize:12,fontWeight:700,color:c.warn,marginBottom:6}}>⚠ 충돌 감지됨</div>
+          {conflicts.map((cf,i) => <div key={i} style={{fontSize:11,color:c.warn}}>{cf.msg}</div>)}
+        </div>
+      )}
+
+      {allEmpty ? (
+        <Card c={c} style={{padding:36,textAlign:"center"}}>
+          <div style={{fontSize:32,marginBottom:10}}>📝</div>
+          <div style={{fontSize:13,fontWeight:600,color:c.text,marginBottom:4}}>요구사항이 아직 없어요</div>
+          <div style={{fontSize:11,color:c.textSub}}>브리핑 생성 또는 상담 기록 AI 분석 시 자동으로 항목이 누적됩니다.</div>
+        </Card>
+      ) : (
+        <>
+          <Section title="Must Have" items={reqs.must_have} sectionKey="must_have" badgeColor={c.error}/>
+          <Section title="Should Have" items={reqs.should_have} sectionKey="should_have" badgeColor={c.warn}/>
+          <Section title="Nice to Have" items={reqs.nice_to_have} sectionKey="nice_to_have"/>
+          {reqs.open_questions && reqs.open_questions.length > 0 && (
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.05em"}}>미결 사항 (Open Questions)</div>
+              {reqs.open_questions.map((q,i) => (
+                <div key={i} style={{padding:"8px 12px",marginBottom:4,borderRadius:6,background:c.bg2,fontSize:12,color:c.text}}>
+                  {q.question} {q.source && <span style={{fontSize:10,color:c.textHint}}>— {q.source}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+          {reqs.team_hints && reqs.team_hints.length > 0 && (
+            <div style={{marginBottom:16}}>
+              <div style={{fontSize:12,fontWeight:700,color:c.textSub,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.05em"}}>팀 구성 힌트</div>
+              {reqs.team_hints.map((h,i) => (
+                <div key={i} style={{padding:"8px 12px",marginBottom:4,borderRadius:6,background:c.brandLight,border:"1px solid "+c.brand+"22",fontSize:12,color:c.text}}>
+                  {h.position && <b style={{color:c.brand}}>{h.position}</b>} {h.reason} {h.source && <span style={{fontSize:10,color:c.textHint}}>— {h.source}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// GRIDGE RFP: P-003 — 브리핑 최신본 + 상담기록 최대 5건 모두 참조
+// Document 1: 요구사항 정의서 / Document 2: 팀 매칭 제안서
+const GRIDGE_RFP_SYSTEM = `당신은 GRIDGE IT 리소스 매칭 컨설팅 RFP 작성 전문가입니다.
+입력된 브리핑 + 상담기록을 분석해 두 문서를 JSON으로 반환하세요.
+
+응답 형식 (JSON만):
+{
+  "doc1": {
+    "project_name": "사업명",
+    "background": "배경 (왜 만드는가)",
+    "purpose": "목적 (뭘 달성하려 하는가)",
+    "scope_include": ["포함 항목1"],
+    "scope_exclude": ["제외 항목1 (Phase 2 명시)"],
+    "functional_requirements": [{"id":"FR-APP-01","name":"기능명","detail":"세부 요구사항","priority":"Must Have|Should Have|Phase 2","category":"APP|WEB|SERVER|DATA|DESIGN"}],
+    "non_functional": ["호환성","성능","보안"],
+    "tech_stack_confirmed": ["확정 스택"],
+    "tech_stack_proposed": ["제안 스택"],
+    "timeline": "일정",
+    "open_questions": ["미결 사항1"]
+  },
+  "doc2": {
+    "overview": "프로젝트 개요 1~2줄",
+    "team_a": [{"position":"포지션","grade":"등급","duration_months":2,"weekly_hours":40,"hourly_rate":38180,"work_detail":"업무 세부"}],
+    "team_b_harness": true
+  }
+}
+모든 텍스트는 한국어. JSON만 반환하세요.`;
+
 function ConsultRfp({ project, customer, onBack, onUpdate }) {
   const { c } = useTheme();
   const [rfp, setRfp] = useState(project?.rfp || null);
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [docTab, setDocTab] = useState("doc1");
 
+  // P-003: 브리핑 최신본 + 상담기록 최대 5건
   async function generate() {
     setGenerating(true);
     try {
       const notesRes = await fetch("/api/notes/project/"+project.id);
       const notesRaw = notesRes.ok ? await notesRes.json() : [];
-      const notes = Array.isArray(notesRaw) ? notesRaw : [];
-      const notesJson = JSON.stringify(notes.map(function(n) {
-        return { date: n.date, type: n.type, summary: n.summary, content: n.content, client_requests: n.client_requests, concerns: n.concerns };
-      }));
-      const strData = project.briefing_structured || {};
-      const briefingJson = JSON.stringify(strData);
-      const userMsg = "[브리핑 데이터]\n"+briefingJson+"\n\n[상담 노트]\n"+notesJson;
-      const raw = await callClaude(RFP_SYSTEM, userMsg, 4000);
+      const notes = (Array.isArray(notesRaw) ? notesRaw : []).slice(0, 5);
+      const notesBlock = notes.length > 0 ? notes.map(function(n, idx) {
+        return "["+(idx+1)+"차 상담 "+(n.date||"")+"] "+(n.summary||"")+(n.content?"\n"+n.content:"")+(n.client_requests?"\n요청: "+n.client_requests:"");
+      }).join("\n---\n") : "상담 기록 없음";
+
+      const briefingText = project.briefing || "브리핑 없음";
+      const userMsg = "[브리핑 최신본]\n" + briefingText + "\n\n[상담기록 최대 5건]\n" + notesBlock +
+        "\n\n[고객 정보]\n회사: "+(customer.company||"")+"\nRM: "+(customer.rm_name||project.rmId||"미정")+
+        "\n예산: "+(customer.budget||"미정");
+
+      const raw = await callClaude(GRIDGE_RFP_SYSTEM, userMsg, 5000);
       const mt = raw.match(/\{[\s\S]*\}/);
       if (!mt) throw new Error("JSON 파싱 실패");
       const parsed = JSON.parse(mt[0]);
-      if (typeof parsed !== "object" || parsed === null) throw new Error("RFP 데이터 형식 오류");
-      const normalizedParsed = Object.assign({}, parsed, {
-        scope_of_work: Array.isArray(parsed.scope_of_work) ? parsed.scope_of_work : [],
-        must_have: Array.isArray(parsed.must_have) ? parsed.must_have : [],
-        should_have: Array.isArray(parsed.should_have) ? parsed.should_have : [],
-        out_of_scope: Array.isArray(parsed.out_of_scope) ? parsed.out_of_scope : [],
-        known_facts: Array.isArray(parsed.known_facts) ? parsed.known_facts : [],
-        assumptions: Array.isArray(parsed.assumptions) ? parsed.assumptions : [],
-        unknown_questions: Array.isArray(parsed.unknown_questions) ? parsed.unknown_questions : [],
-        stakeholders: Array.isArray(parsed.stakeholders) ? parsed.stakeholders : [],
-        success_criteria: Array.isArray(parsed.success_criteria) ? parsed.success_criteria : [],
-        problem_cases: Array.isArray(parsed.problem_cases) ? parsed.problem_cases : [],
-        explicit_exclusions: Array.isArray(parsed.explicit_exclusions) ? parsed.explicit_exclusions : [],
-      });
-      setRfp(normalizedParsed);
-      const updated = Object.assign({}, project, {rfp: normalizedParsed});
-      const saved = await updateProject(project.id, updated);
+      const result = {
+        doc1: Object.assign({ project_name:"", background:"", purpose:"", scope_include:[], scope_exclude:[], functional_requirements:[], non_functional:[], tech_stack_confirmed:[], tech_stack_proposed:[], timeline:"", open_questions:[] }, parsed.doc1||{}),
+        doc2: Object.assign({ overview:"", team_a:[], team_b_harness:true }, parsed.doc2||{}),
+        generated_at: new Date().toISOString(),
+      };
+      setRfp(result);
+      const updatedProject = Object.assign({}, project, { rfp: result, rfp_doc1: result.doc1, rfp_doc2: result.doc2 });
+      const saved = await updateProject(project.id, updatedProject);
       onUpdate(saved);
     } catch(e) { alert("RFP 생성 오류: "+e.message); }
     setGenerating(false);
   }
 
-  async function saveRfp(updated) {
+  async function saveRfp() {
     setSaving(true);
-    setRfp(updated);
-    const proj = Object.assign({}, project, {rfp: updated});
-    const saved = await updateProject(project.id, proj);
+    const updatedProject = Object.assign({}, project, { rfp, rfp_doc1: rfp.doc1, rfp_doc2: rfp.doc2 });
+    const saved = await updateProject(project.id, updatedProject);
     onUpdate(saved);
     setSaving(false);
   }
 
-  function updRfp(key, val) { setRfp(function(p) { return {...p, [key]: val}; }); }
+  // 하네스(B안) 시급 = A안 × 0.5, 기간 × 0.7
+  function calcHarness(team_a) {
+    return (team_a||[]).map(function(m) {
+      return Object.assign({}, m, {
+        hourly_rate: Math.round((m.hourly_rate||0) * 0.5),
+        duration_months: Math.round((m.duration_months||1) * 0.7 * 10) / 10,
+      });
+    });
+  }
+  function memberMonthly(m) {
+    return Math.round((m.hourly_rate||0) * (m.weekly_hours||40) * 4.33);
+  }
+  function teamTotal(members) {
+    return (members||[]).reduce(function(sum, m) { return sum + memberMonthly(m) * (m.duration_months||1); }, 0);
+  }
+  function fmt(n) { return Math.round(n).toLocaleString("ko-KR"); }
 
-  const sourceBadge = function(src) {
-    if (!src) return null;
-    var bg = src.includes("브리핑") ? "#1971C2" : src.includes("노트") ? "#2F9E44" : "#E67700";
-    return <span style={{padding:"2px 7px",borderRadius:10,fontSize:10,fontWeight:700,color:"#fff",background:bg,marginLeft:6}}>{src}</span>;
-  };
-
-  const iSt = {width:"100%",padding:"9px 12px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",boxSizing:"border-box"};
-  const taSt = {...iSt, resize:"vertical"};
+  const iSt = {width:"100%",padding:"8px 10px",borderRadius:8,border:"1px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none",boxSizing:"border-box"};
 
   return (
     <div>
@@ -2850,166 +3030,208 @@ function ConsultRfp({ project, customer, onBack, onUpdate }) {
         <div>
           <div style={{fontSize:20,fontWeight:800,color:c.text,marginBottom:3}}>RFP</div>
           <div style={{fontSize:12,color:c.textSub}}>{project.title} · {customer.company}</div>
+          <div style={{fontSize:10,color:c.textHint,marginTop:2}}>P-005: RM이 수동으로 시작 · P-003: 브리핑 + 상담기록 최대 5건 참조</div>
         </div>
         <div style={{display:"flex",gap:8}}>
-          {rfp && <Btn onClick={() => saveRfp(rfp)} c={c} disabled={saving} variant="ghost" style={{fontSize:12}}>{saving?"저장 중...":"저장"}</Btn>}
-          <Btn onClick={generate} c={c} disabled={generating}>{generating?"생성 중...":(rfp?"재생성":"RFP 생성")}</Btn>
+          {rfp && <Btn onClick={saveRfp} c={c} disabled={saving} variant="ghost" style={{fontSize:12}}>{saving?"저장 중...":"저장"}</Btn>}
+          <Btn onClick={generate} c={c} disabled={generating}>{generating?"생성 중...":(rfp?"재생성":"RFP 시작")}</Btn>
         </div>
       </div>
 
       {!rfp && !generating && (
-        <div style={{padding:"48px 0",textAlign:"center",color:c.textHint}}>
-          <div style={{fontSize:28,marginBottom:12}}>📄</div>
-          <div style={{fontSize:14,fontWeight:600,color:c.text,marginBottom:6}}>RFP 초안을 생성하세요</div>
-          <div style={{fontSize:12,color:c.textSub}}>요구사항 정리와 상담 노트를 바탕으로 AI가 RFP를 작성합니다</div>
-        </div>
+        <Card c={c} style={{padding:40,textAlign:"center"}}>
+          <div style={{fontSize:32,marginBottom:10}}>📄</div>
+          <div style={{fontSize:14,fontWeight:700,color:c.text,marginBottom:6}}>RFP를 시작하세요</div>
+          <div style={{fontSize:12,color:c.textSub,marginBottom:4}}>브리핑 최신본 + 상담기록(최대 5건)을 기반으로</div>
+          <div style={{fontSize:12,color:c.textSub}}>문서1 (요구사항 정의서) + 문서2 (팀 매칭 제안서)를 생성합니다</div>
+        </Card>
       )}
-      {generating && <div style={{padding:"32px 0",textAlign:"center",color:c.textSub,fontSize:13}}>AI가 RFP를 작성 중입니다...</div>}
+      {generating && (
+        <Card c={c} style={{padding:"20px 24px"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:28,height:28,borderRadius:"50%",border:"3px solid "+c.brandLight,borderTopColor:c.brand,animation:"spin 1s linear infinite"}}/>
+            <div>
+              <div style={{fontSize:13,fontWeight:600,color:c.text}}>RFP 문서 생성 중...</div>
+              <div style={{fontSize:11,color:c.textSub,marginTop:2}}>문서1 (요구사항 정의서) + 문서2 (팀 매칭 제안서) 동시 생성</div>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {rfp && !generating && (
-        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-
-          {/* 문제/목표 */}
-          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
-            <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>문제 & 목표</div>
-            <div style={{padding:16,display:"grid",gap:12}}>
-              <div>
-                <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>핵심 문제</div>
-                <textarea value={rfp.problem_statement||""} onChange={e => updRfp("problem_statement",e.target.value)} rows={2} style={taSt}/>
-              </div>
-              <div>
-                <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>목표 (Outcome)</div>
-                <textarea value={rfp.goal_statement||""} onChange={e => updRfp("goal_statement",e.target.value)} rows={2} style={taSt}/>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-                <div>
-                  <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>현재 상태</div>
-                  <textarea value={rfp.current_state||""} onChange={e => updRfp("current_state",e.target.value)} rows={2} style={taSt}/>
-                </div>
-                <div>
-                  <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>목표 상태</div>
-                  <textarea value={rfp.target_state||""} onChange={e => updRfp("target_state",e.target.value)} rows={2} style={taSt}/>
-                </div>
-              </div>
-            </div>
+        <div>
+          {/* 문서 탭 */}
+          <div style={{display:"flex",borderBottom:"1px solid "+c.divider,marginBottom:20}}>
+            {[["doc1","문서1: 요구사항 정의서"],["doc2","문서2: 팀 매칭 제안서"]].map(function(pair) {
+              var isActive = docTab===pair[0];
+              return (
+                <button key={pair[0]} onClick={function(){setDocTab(pair[0]);}} style={{padding:"9px 20px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:isActive?700:500,color:isActive?c.brand:c.textSub,borderBottom:isActive?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>
+                  {pair[1]}
+                </button>
+              );
+            })}
           </div>
 
-          {/* 업무 범위 */}
-          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
-            <div style={{padding:"10px 16px",background:c.bg2,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:12,fontWeight:700,color:c.text}}>업무 범위 (Scope of Work)</span>
-              <button onClick={function(){ updRfp("scope_of_work",(rfp.scope_of_work||[]).concat([""])); }} style={{padding:"3px 10px",borderRadius:6,border:"1.5px solid "+c.brand,background:c.brandLight,color:c.brand,fontSize:11,fontWeight:600,cursor:"pointer"}}>+ 항목 추가</button>
-            </div>
-            <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:6}}>
-              {(rfp.scope_of_work||[]).length === 0 && (
-                <div style={{fontSize:12,color:c.textHint,textAlign:"center",padding:"8px 0"}}>항목을 추가하거나 RFP를 재생성하세요</div>
+          {/* 문서1: 요구사항 정의서 */}
+          {docTab==="doc1" && rfp.doc1 && (
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              {/* 사업 개요 */}
+              <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+                <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>1. 사업 개요</div>
+                <div style={{padding:16,display:"grid",gap:10}}>
+                  {[["project_name","1.1 사업명"],["background","1.2 배경 (왜 만드는가)"],["purpose","1.3 목적 (달성 목표)"]].map(function(p) {
+                    return (
+                      <div key={p[0]}>
+                        <div style={{fontSize:11,color:c.textSub,marginBottom:4,fontWeight:600}}>{p[1]}</div>
+                        <input value={rfp.doc1[p[0]]||""} onChange={function(e){setRfp(function(r){var d=Object.assign({},r.doc1,[p[0]],{});d[p[0]]=e.target.value;return Object.assign({},r,{doc1:d});});}} style={iSt}/>
+                      </div>
+                    );
+                  })}
+                  <div>
+                    <div style={{fontSize:11,color:c.textSub,marginBottom:4,fontWeight:600}}>1.4 범위 요약</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                      <div>
+                        <div style={{fontSize:10,color:c.brand,marginBottom:4}}>포함</div>
+                        {(rfp.doc1.scope_include||[]).map(function(s,i){return (<div key={i} style={{display:"flex",gap:6,marginBottom:4}}><input value={s} onChange={function(e){var a=[].concat(rfp.doc1.scope_include);a[i]=e.target.value;setRfp(function(r){return Object.assign({},r,{doc1:Object.assign({},r.doc1,{scope_include:a})});});}} style={{...iSt,flex:1}}/><button onClick={function(){setRfp(function(r){return Object.assign({},r,{doc1:Object.assign({},r.doc1,{scope_include:(rfp.doc1.scope_include||[]).filter(function(_,j){return j!==i;})})});});}} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint}}>×</button></div>);})}
+                        <button onClick={function(){setRfp(function(r){return Object.assign({},r,{doc1:Object.assign({},r.doc1,{scope_include:(r.doc1.scope_include||[]).concat([""])})});});}} style={{fontSize:11,color:c.brand,background:"none",border:"none",cursor:"pointer",padding:"2px 0"}}>+ 추가</button>
+                      </div>
+                      <div>
+                        <div style={{fontSize:10,color:c.textSub,marginBottom:4}}>제외 (Phase 2)</div>
+                        {(rfp.doc1.scope_exclude||[]).map(function(s,i){return (<div key={i} style={{display:"flex",gap:6,marginBottom:4}}><input value={s} onChange={function(e){var a=[].concat(rfp.doc1.scope_exclude);a[i]=e.target.value;setRfp(function(r){return Object.assign({},r,{doc1:Object.assign({},r.doc1,{scope_exclude:a})});});}} style={{...iSt,flex:1}}/><button onClick={function(){setRfp(function(r){return Object.assign({},r,{doc1:Object.assign({},r.doc1,{scope_exclude:(rfp.doc1.scope_exclude||[]).filter(function(_,j){return j!==i;})})});});}} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint}}>×</button></div>);})}
+                        <button onClick={function(){setRfp(function(r){return Object.assign({},r,{doc1:Object.assign({},r.doc1,{scope_exclude:(r.doc1.scope_exclude||[]).concat([""])})});});}} style={{fontSize:11,color:c.textSub,background:"none",border:"none",cursor:"pointer",padding:"2px 0"}}>+ 추가</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 기능 요구사항 */}
+              <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+                <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>2. 기능 요구사항</div>
+                <div style={{padding:0}}>
+                  {(rfp.doc1.functional_requirements||[]).length === 0 && (
+                    <div style={{padding:"20px",textAlign:"center",color:c.textHint,fontSize:12}}>기능 요구사항 없음</div>
+                  )}
+                  {(rfp.doc1.functional_requirements||[]).map(function(fr, i) {
+                    const pColor = fr.priority==="Must Have"?c.brand:fr.priority==="Should Have"?c.warn:c.textHint;
+                    return (
+                      <div key={i} style={{padding:"10px 16px",borderBottom:"1px solid "+c.divider,display:"grid",gridTemplateColumns:"80px 1fr 160px",gap:10,alignItems:"start"}}>
+                        <div style={{fontSize:10,fontWeight:700,color:c.brand,paddingTop:3}}>{fr.id}</div>
+                        <div>
+                          <div style={{fontSize:12,fontWeight:600,color:c.text,marginBottom:2}}>{fr.name}</div>
+                          <div style={{fontSize:11,color:c.textSub}}>{fr.detail}</div>
+                        </div>
+                        <span style={{fontSize:10,padding:"2px 8px",borderRadius:4,background:pColor+"22",color:pColor,fontWeight:600,display:"inline-block"}}>{fr.priority}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 기술 스택 */}
+              {((rfp.doc1.tech_stack_confirmed||[]).length>0 || (rfp.doc1.tech_stack_proposed||[]).length>0) && (
+                <div style={{borderRadius:12,border:"1px solid "+c.divider,padding:14}}>
+                  <div style={{fontSize:12,fontWeight:700,color:c.text,marginBottom:10}}>4. 기술 스택</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                    <div><div style={{fontSize:11,color:c.brand,fontWeight:600,marginBottom:6}}>확정 스택 (상담 언급)</div>{(rfp.doc1.tech_stack_confirmed||[]).map(function(t,i){return <div key={i} style={{fontSize:11,color:c.text,marginBottom:3}}>• {t}</div>;})}</div>
+                    <div><div style={{fontSize:11,color:c.textSub,fontWeight:600,marginBottom:6}}>제안 스택 (AI 추천)</div>{(rfp.doc1.tech_stack_proposed||[]).map(function(t,i){return <div key={i} style={{fontSize:11,color:c.textSub,marginBottom:3}}>• {t}</div>;})}</div>
+                  </div>
+                </div>
               )}
-              {(rfp.scope_of_work||[]).map(function(item, i) {
-                return (
-                  <div key={i} style={{display:"flex",gap:8,alignItems:"center"}}>
-                    <span style={{fontSize:13,color:c.textSub,minWidth:14}}>▸</span>
-                    <input value={item} onChange={function(e){ var arr=[].concat(rfp.scope_of_work); arr[i]=e.target.value; updRfp("scope_of_work",arr); }} style={{...iSt,flex:1}}/>
-                    <button onClick={function(){ updRfp("scope_of_work",(rfp.scope_of_work||[]).filter(function(_,j){return j!==i;})); }} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint,fontSize:16}}>×</button>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
 
-          {/* 미확인 질문 — 강조 */}
-          {rfp.unknown_questions && rfp.unknown_questions.length > 0 && (
-            <div style={{borderRadius:12,border:"2px solid #E67700",overflow:"hidden",background:"rgba(230,119,0,0.04)"}}>
-              <div style={{padding:"10px 16px",background:"rgba(230,119,0,0.1)",fontSize:12,fontWeight:700,color:"#E67700"}}>⚠ 고객에게 확인해야 할 미결 질문 ({rfp.unknown_questions.length}건)</div>
-              <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:6}}>
-                {rfp.unknown_questions.map(function(q, i) {
-                  return (
-                    <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                      <span style={{minWidth:18,height:18,borderRadius:9,background:"#E67700",color:"#fff",fontSize:10,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",marginTop:1}}>{i+1}</span>
-                      <input value={q} onChange={function(e){ var arr=[].concat(rfp.unknown_questions); arr[i]=e.target.value; updRfp("unknown_questions",arr); }} style={{...iSt,flex:1}}/>
-                      <button onClick={function(){ updRfp("unknown_questions",rfp.unknown_questions.filter(function(_,j){return j!==i;})); }} style={{background:"none",border:"none",cursor:"pointer",color:c.textHint,fontSize:16}}>×</button>
+              {/* 미결 사항 */}
+              {(rfp.doc1.open_questions||[]).length > 0 && (
+                <div style={{borderRadius:12,border:"1px solid "+c.errorBorder||"rgba(242,184,181,0.28)",padding:14,background:c.errorCont||"rgba(242,184,181,0.08)"}}>
+                  <div style={{fontSize:12,fontWeight:700,color:c.error||"#F2B8B5",marginBottom:8}}>6. 비고 / 미결 사항</div>
+                  {(rfp.doc1.open_questions||[]).map(function(q,i){return <div key={i} style={{fontSize:12,color:c.text,marginBottom:4}}>• {q}</div>;})}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 문서2: 팀 매칭 제안서 */}
+          {docTab==="doc2" && rfp.doc2 && (
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              {/* 헤더 */}
+              <div style={{borderRadius:12,border:"1px solid "+c.divider,padding:16}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+                  <div style={{fontSize:13,fontWeight:700,color:c.text}}>{customer.company} 대표님</div>
+                  <div style={{fontSize:12,color:c.textSub}}>GRIDGE 담당자: {customer.rm_name||project.rmId||"미정"}</div>
+                </div>
+                <div style={{fontSize:12,color:c.text,lineHeight:1.7}}>{rfp.doc2.overview}</div>
+              </div>
+
+              {/* A안: 일반팀 */}
+              <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
+                <div style={{padding:"10px 16px",background:c.brandLight,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:12,fontWeight:700,color:c.brand}}>A안 — 일반팀</span>
+                  <span style={{fontSize:12,fontWeight:700,color:c.brand}}>합계: {fmt(teamTotal(rfp.doc2.team_a))}원</span>
+                </div>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{background:c.bg2}}>
+                      {["포지션","등급","시급","기간","월 금액","총 금액"].map(function(h){return <th key={h} style={{padding:"8px 12px",textAlign:"left",fontSize:10,fontWeight:600,color:c.textSub,whiteSpace:"nowrap"}}>{h}</th>;})}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(rfp.doc2.team_a||[]).map(function(m, i) {
+                      var monthly = memberMonthly(m);
+                      var total = monthly * (m.duration_months||1);
+                      return (
+                        <tr key={i} style={{borderBottom:"1px solid "+c.divider}}>
+                          <td style={{padding:"9px 12px",color:c.text,fontWeight:500}}>{m.position}</td>
+                          <td style={{padding:"9px 12px",color:c.textSub}}>{m.grade}</td>
+                          <td style={{padding:"9px 12px",color:c.text}}>{fmt(m.hourly_rate||0)}원/h</td>
+                          <td style={{padding:"9px 12px",color:c.textSub}}>{m.duration_months}개월</td>
+                          <td style={{padding:"9px 12px",color:c.text}}>{fmt(monthly)}원</td>
+                          <td style={{padding:"9px 12px",color:c.text,fontWeight:600}}>{fmt(total)}원</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* B안: 하네스 */}
+              {rfp.doc2.team_b_harness && (function() {
+                var teamB = calcHarness(rfp.doc2.team_a);
+                return (
+                  <div style={{borderRadius:12,border:"1px solid "+HARNESS_INDICATOR_COLOR+"44",overflow:"hidden"}}>
+                    <div style={{padding:"10px 16px",background:HARNESS_INDICATOR_COLOR+"18",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                      <div>
+                        <span style={{fontSize:12,fontWeight:700,color:HARNESS_INDICATOR_COLOR}}>B안 — 하네스 (AI+H)</span>
+                        <span style={{fontSize:10,color:HARNESS_INDICATOR_COLOR,marginLeft:8}}>시급 ×0.5 · 기간 ×0.7</span>
+                      </div>
+                      <span style={{fontSize:12,fontWeight:700,color:HARNESS_INDICATOR_COLOR}}>합계: {fmt(teamTotal(teamB))}원</span>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* 요구사항 */}
-          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
-            <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>요구사항</div>
-            <div style={{padding:16}}>
-              <div style={{fontSize:11,fontWeight:700,color:"#1971C2",marginBottom:8}}>Must Have</div>
-              {(rfp.must_have||[]).map(function(item, i) {
-                return (
-                  <div key={i} style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
-                    <span style={{fontSize:11,color:c.textSub,minWidth:16}}>▸</span>
-                    <input value={item.item||""} onChange={function(e){ var arr=rfp.must_have.map(function(x,j){return j===i?{...x,item:e.target.value}:x;}); updRfp("must_have",arr); }} placeholder="항목" style={{...iSt,flex:2}}/>
-                    <input value={item.reason||""} onChange={function(e){ var arr=rfp.must_have.map(function(x,j){return j===i?{...x,reason:e.target.value}:x;}); updRfp("must_have",arr); }} placeholder="이유" style={{...iSt,flex:3}}/>
+                    <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                      <thead>
+                        <tr style={{background:c.bg2}}>
+                          {["포지션","등급","시급(AI)","기간","월 금액","총 금액"].map(function(h){return <th key={h} style={{padding:"8px 12px",textAlign:"left",fontSize:10,fontWeight:600,color:c.textSub}}>{h}</th>;})}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {teamB.map(function(m, i) {
+                          var monthly = memberMonthly(m);
+                          var total = monthly * (m.duration_months||1);
+                          return (
+                            <tr key={i} style={{borderBottom:"1px solid "+c.divider}}>
+                              <td style={{padding:"9px 12px",color:c.text,fontWeight:500}}>{m.position}</td>
+                              <td style={{padding:"9px 12px",color:c.textSub}}>{m.grade}</td>
+                              <td style={{padding:"9px 12px",color:HARNESS_INDICATOR_COLOR}}>{fmt(m.hourly_rate||0)}원/h</td>
+                              <td style={{padding:"9px 12px",color:c.textSub}}>{m.duration_months}개월</td>
+                              <td style={{padding:"9px 12px",color:c.text}}>{fmt(monthly)}원</td>
+                              <td style={{padding:"9px 12px",color:HARNESS_INDICATOR_COLOR,fontWeight:600}}>{fmt(total)}원</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
                 );
-              })}
-              <div style={{fontSize:11,fontWeight:700,color:"#2F9E44",marginBottom:8,marginTop:14}}>Should Have</div>
-              {(rfp.should_have||[]).map(function(item, i) {
-                return (
-                  <div key={i} style={{display:"flex",gap:8,marginBottom:6,alignItems:"center"}}>
-                    <span style={{fontSize:11,color:c.textSub,minWidth:16}}>▸</span>
-                    <input value={item.item||""} onChange={function(e){ var arr=rfp.should_have.map(function(x,j){return j===i?{...x,item:e.target.value}:x;}); updRfp("should_have",arr); }} placeholder="항목" style={{...iSt,flex:2}}/>
-                    <select value={item.priority||"중"} onChange={function(e){ var arr=rfp.should_have.map(function(x,j){return j===i?{...x,priority:e.target.value}:x;}); updRfp("should_have",arr); }} style={{padding:"9px 8px",borderRadius:8,border:"1.5px solid "+c.inputBorder,background:c.inputBg,fontSize:12,color:c.text,outline:"none"}}>
-                      {["상","중","하"].map(function(p){return <option key={p}>{p}</option>;})}
-                    </select>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 알고 있는 것 / 추정 */}
-          {((rfp.known_facts||[]).length>0 || (rfp.assumptions||[]).length>0) && (
-            <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
-              <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>알고 있는 것 & 추정</div>
-              <div style={{padding:16}}>
-                {(rfp.known_facts||[]).map(function(f, i) {
-                  return <div key={i} style={{fontSize:12,color:c.text,marginBottom:6,display:"flex",alignItems:"center"}}>{sourceBadge(f.source)}<span style={{marginLeft:8}}>{f.content}</span></div>;
-                })}
-                {(rfp.assumptions||[]).map(function(f, i) {
-                  return <div key={i} style={{fontSize:12,color:c.textSub,marginBottom:6,display:"flex",alignItems:"center"}}>{sourceBadge(f.source)}<span style={{marginLeft:8}}>{f.content}</span></div>;
-                })}
-              </div>
+              })()}
             </div>
           )}
-
-          {/* 제약 조건 */}
-          <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
-            <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>제약 조건</div>
-            <div style={{padding:16,display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
-              {[["timeline","일정"],["budget_range","예산"],["tech_constraints","기술 제약"],["org_constraints","조직 제약"]].map(function(pair) {
-                return (
-                  <div key={pair[0]}>
-                    <div style={{fontSize:11,fontWeight:600,color:c.textSub,marginBottom:4}}>{pair[1]}</div>
-                    <textarea value={rfp[pair[0]]||""} onChange={function(e){ updRfp(pair[0],e.target.value); }} rows={2} style={taSt}/>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* 성공 기준 */}
-          {(rfp.success_criteria||[]).length>0 && (
-            <div style={{borderRadius:12,border:"1px solid "+c.divider,overflow:"hidden"}}>
-              <div style={{padding:"10px 16px",background:c.bg2,fontSize:12,fontWeight:700,color:c.text}}>성공 기준</div>
-              <div style={{padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
-                {(rfp.success_criteria||[]).map(function(sc, i) {
-                  return (
-                    <div key={i} style={{padding:"10px 12px",borderRadius:8,background:c.bg2,border:"1px solid "+c.divider}}>
-                      <div style={{fontSize:12,fontWeight:600,color:c.text,marginBottom:4}}>{sc.metric}</div>
-                      <div style={{fontSize:11,color:c.textSub}}>목표: {sc.target} · 측정: {sc.measurement_method}</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
         </div>
       )}
     </div>
@@ -3094,15 +3316,48 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
 
   const activeList = customers.filter(cu => !["계약성사","이탈"].includes(cu.status));
 
+  // 요구사항 기여 핸들러 (상담기록 AI 분석 → 요구사항 탭 자동 누적)
+  async function handleRequirementsContribute({ items, openQuestions }) {
+    if (!selectedProject) return;
+    const existingReqs = selectedProject.requirements || { must_have:[], should_have:[], nice_to_have:[], tech_spec:{}, team_hints:[], open_questions:[], version:1 };
+    const mustItems = items.filter(i => i.priority === "must_have");
+    const shouldItems = items.filter(i => i.priority === "should_have");
+    const niceItems = items.filter(i => i.priority !== "must_have" && i.priority !== "should_have");
+    const newReqs = Object.assign({}, existingReqs, {
+      must_have:    (existingReqs.must_have||[]).concat(mustItems),
+      should_have:  (existingReqs.should_have||[]).concat(shouldItems),
+      nice_to_have: (existingReqs.nice_to_have||[]).concat(niceItems),
+      open_questions: (existingReqs.open_questions||[]).concat(openQuestions||[]),
+      version: (existingReqs.version||1) + 1,
+    });
+    const saved = await updateProject(selectedProject.id, Object.assign({}, selectedProject, { requirements: newReqs }));
+    handleUpdateProject(saved);
+  }
+
+  // GRIDGE 4개 탭: 브리핑 / 상담기록 / 요구사항 / RFP
+  const PROJECT_TABS = ["브리핑","상담기록","요구사항","RFP"];
+
   // 프로젝트 선택 후 탭 콘텐츠
   if (selected && selectedProject) {
-    if (tab === "브리핑") return <BriefingDetail project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>;
-    if (tab === "RFP") return <ConsultRfp project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>;
-    if (tab === "회의록분석") return (
+    const tabBar = (
+      <div style={{display:"flex",gap:0,borderBottom:"1px solid "+c.divider,marginBottom:20}}>
+        {PROJECT_TABS.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{padding:"9px 18px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:tab===t?700:500,color:tab===t?c.brand:c.textSub,borderBottom:tab===t?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1,transition:"color .15s"}}>{t}</button>
+        ))}
+      </div>
+    );
+    if (tab === "브리핑") return (
       <div>
+        {tabBar}
+        <BriefingDetail project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>
+      </div>
+    );
+    if (tab === "상담기록") return (
+      <div>
+        {tabBar}
         <BackBtn onClick={() => setSelectedProject(null)}/>
         <div style={{fontSize:18,fontWeight:800,color:c.text,marginBottom:2}}>{selectedProject.title}</div>
-        <div style={{fontSize:13,color:c.textSub,marginBottom:20}}>{selected.company}</div>
+        <div style={{fontSize:13,color:c.textSub,marginBottom:16}}>{selected.company}</div>
         <ConsultNotes
           projectId={selectedProject.id}
           customerId={selected.id}
@@ -3110,10 +3365,22 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
           onExtracted={async info => { await updateCustomer({...selected, ...info}); }}
           onDriftNewProject={handleDriftNewProject}
           onContextChanged={handleContextChanged}
+          onRequirementsContribute={handleRequirementsContribute}
         />
       </div>
     );
-    if (tab === "팀빌딩") return <TeamBuildingDetail customer={{...selected, ...selectedProject}} onBack={() => setSelectedProject(null)} onUpdate={async u => { await updateCustomer(u); }}/>;
+    if (tab === "요구사항") return (
+      <div>
+        {tabBar}
+        <RequirementsDetail project={selectedProject} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>
+      </div>
+    );
+    if (tab === "RFP") return (
+      <div>
+        {tabBar}
+        <ConsultRfp project={selectedProject} customer={selected} onBack={() => setSelectedProject(null)} onUpdate={handleUpdateProject}/>
+      </div>
+    );
   }
 
   // 고객 선택 후 프로젝트 목록
@@ -3126,20 +3393,26 @@ function Consulting({ user, initialTarget, onConsumeTarget }){
     );
   }
 
-  // 고객 목록
+  // 고객 목록 (GRIDGE: 활성 고객만)
   return (
     <div>
       <div style={{fontSize:18,fontWeight:700,color:c.text,marginBottom:4}}>상담관리</div>
-      <div style={{fontSize:13,color:c.textSub,marginBottom:20}}>AI 기반 상담 인텔리전스</div>
+      <div style={{fontSize:13,color:c.textSub,marginBottom:20}}>브리핑 · 상담기록 · 요구사항 · RFP</div>
       <div style={{display:"flex",gap:0,borderBottom:"1px solid "+c.divider,marginBottom:24}}>
-        {["브리핑","회의록분석","RFP","팀빌딩"].map(t => (
-          <button key={t} onClick={() => { setTab(t); setSelected(null); setSelectedProject(null); }} style={{padding:"8px 16px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:tab===t?700:500,color:tab===t?c.brand:c.textSub,borderBottom:tab===t?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>{t}</button>
+        {PROJECT_TABS.map(t => (
+          <button key={t} onClick={() => { setTab(t); setSelected(null); setSelectedProject(null); }} style={{padding:"9px 18px",border:"none",background:"none",cursor:"pointer",fontSize:13,fontWeight:tab===t?700:500,color:tab===t?c.brand:c.textSub,borderBottom:tab===t?"2px solid "+c.brand:"2px solid transparent",marginBottom:-1}}>{t}</button>
         ))}
       </div>
-      {loading ? <Loading/> : activeList.length === 0 ? <Card c={c}><div style={{textAlign:"center",padding:"24px 0",color:c.textHint}}>진행 중인 고객이 없어요</div></Card> : (
+      {loading ? <Loading/> : activeList.length === 0 ? (
+        <Card c={c} style={{padding:36,textAlign:"center"}}>
+          <div style={{fontSize:32,marginBottom:10}}>🏢</div>
+          <div style={{fontSize:13,fontWeight:600,color:c.text,marginBottom:4}}>진행 중인 고객이 없어요</div>
+          <div style={{fontSize:11,color:c.textSub}}>고객관리에서 고객을 추가하면 여기서 상담을 진행할 수 있어요.</div>
+        </Card>
+      ) : (
         <div style={{display:"grid",gap:10}}>
           {activeList.map(cu => (
-            <Card key={cu.id} c={c} style={{padding:"16px 20px"}} onClick={() => handleSelectCustomer(cu)}>
+            <Card key={cu.id} c={c} style={{padding:"16px 20px",cursor:"pointer"}} onClick={() => handleSelectCustomer(cu)}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
                   <div style={{fontSize:14,fontWeight:700,color:c.text}}>{cu.company}</div>

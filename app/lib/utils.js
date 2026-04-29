@@ -7,6 +7,7 @@ import {
   DEFAULT_AI_CONFIG, DEFAULT_CATEGORIES, STAGE_ORDER,
   AI_DISCOUNT_RATE, AI_DURATION_REDUCTION, HARNESS_RATE_MULTIPLIER,
   PATTERN_KEY, PATTERN_LIMIT,
+  ROLE_GROUP_MAP, PERMISSIONS,
 } from "./constants";
 
 // ─── 날짜 ─────────────────────────────────────────
@@ -38,7 +39,8 @@ export function getCompletedStages(cu) {
   if (cu.rm_name) done.add("RM배정");
   if (cu.briefing) done.add("브리핑완료");
   if (STAGE_ORDER.indexOf(cu.status) >= STAGE_ORDER.indexOf("미팅완료")) done.add("미팅완료");
-  if (cu.team_building || cu.proposal_data) done.add("팀빌딩검토");
+  // RFP 문서 존재 시 → RFP 상태 (팀빌딩검토 대체)
+  if (cu.rfp || cu.rfp_doc1 || cu.team_building || cu.proposal_data) done.add("RFP");
   if (cu.status === "계약성사") done.add("계약성사");
   if (cu.status === "이탈") done.add("이탈");
   return done;
@@ -46,7 +48,7 @@ export function getCompletedStages(cu) {
 export function autoStatus(cu) {
   if (["계약성사", "이탈"].includes(cu.status)) return cu.status;
   const done = getCompletedStages(cu);
-  for (const s of ["팀빌딩검토", "미팅완료", "브리핑완료", "RM배정"]) if (done.has(s)) return s;
+  for (const s of ["RFP", "미팅완료", "브리핑완료", "RM배정"]) if (done.has(s)) return s;
   return "신규접수";
 }
 export function applyCorrections(data) {
@@ -301,7 +303,24 @@ export async function addPattern(reason) {
 }
 
 // ─── 권한 그룹 (ACC-ROLE-001) ──────────────────────
+// ─── GRIDGE 5역할 시스템 (GRIDGE_PERMISSIONS.md §3) ──────────────────────
 export function roleGroupOf(user) {
+  if (!user) return "STAFF_RM";
+  if (user.id === "local") return "LOCAL";
+  if (user.isAdmin) return "TEAM_LEAD";
+  return ROLE_GROUP_MAP[user.grade] || "STAFF_RM";
+}
+
+// 권한 체크 (GRIDGE_PERMISSIONS.md §4)
+export function can(user, action) {
+  const group = roleGroupOf(user);
+  const allowed = PERMISSIONS[action];
+  if (!allowed) return true; // 미정의 권한은 기본 허용
+  return allowed.indexOf(group) !== -1;
+}
+
+// 레거시 호환: 기존 코드가 "관리자"/"팀장"/"RM" 문자열을 기대하는 경우
+export function roleGroupOfLegacy(user) {
   if (!user) return "RM";
   if (user.isAdmin || user.grade === "관리자") return "관리자";
   if (user.grade === "팀장" || user.grade === "Lead RM") return "팀장";

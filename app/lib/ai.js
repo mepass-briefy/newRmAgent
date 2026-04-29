@@ -2,12 +2,12 @@
 // Claude API 호출 — 클라이언트에서 직접 fetch 하지 않고 서버 프록시(/api/ai)를 거침.
 // 키는 .env의 ANTHROPIC_API_KEY (서버에서만 보유). REQ-AI-001/002/003/004/005 모두 이 함수를 통과.
 
-export async function callClaude(system, userMsg, maxTokens = 1500, attachments = []) {
+export async function callClaude(system, userMsg, maxTokens = 1500, attachments = [], options = {}) {
   try {
     const res = await fetch("/api/ai", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ system, userMsg, maxTokens, attachments }),
+      body: JSON.stringify({ system, userMsg, maxTokens, attachments, ...options }),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

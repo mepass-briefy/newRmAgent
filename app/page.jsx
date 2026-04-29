@@ -99,7 +99,12 @@ export default function Page() {
         if (!hasAuth) { setAppState("firstSetup"); return; }
         if (savedSession && savedSession.userId) {
           const user = list.find(t => t && t.id === savedSession.userId && !t.tagOnly && t.password);
-          if (user) { setCurrentUser(user); setAppState("app"); return; }
+          if (user) {
+            setCurrentUser(user);
+            setAppState("app");
+            fetch(`/api/seed?userId=${encodeURIComponent(user.id)}`, { method: "POST" }).catch(() => {});
+            return;
+          }
         }
         setAppState("login");
       } catch (e) {
@@ -128,7 +133,7 @@ export default function Page() {
           <GlobalStyles />
           {appState === "firstSetup" && (
             <FirstSetup
-              onCreated={(t, a) => { setTeam(t); setCurrentUser(a); store.set("session", { userId: a.id }); setAppState("app"); }}
+              onCreated={(t, a) => { setTeam(t); setCurrentUser(a); store.set("session", { userId: a.id }); setAppState("app"); fetch(`/api/seed?userId=${encodeURIComponent(a.id)}`, { method: "POST" }).catch(() => {}); }}
               dark={dark}
               toggleTheme={toggle}
             />
@@ -136,7 +141,7 @@ export default function Page() {
           {appState === "login" && (
             <Login
               team={team}
-              onLogin={u => { setCurrentUser(u); store.set("session", { userId: u.id }); setAppState("app"); }}
+              onLogin={u => { setCurrentUser(u); store.set("session", { userId: u.id }); setAppState("app"); fetch(`/api/seed?userId=${encodeURIComponent(u.id)}`, { method: "POST" }).catch(() => {}); }}
               dark={dark}
               toggleTheme={toggle}
             />
@@ -147,10 +152,10 @@ export default function Page() {
                 page={page}
                 setPage={setPage}
                 onLogout={() => { setCurrentUser(null); store.set("session", null); setAppState("login"); }}
-                collapsed={collapsed}
-                setCollapsed={setCollapsed}
                 currentUser={currentUser}
                 perms={perms}
+                dark={dark}
+                toggleTheme={toggle}
               />
               <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
                 <TopBar dark={dark} toggleTheme={toggle} currentUser={currentUser} onOpenCalc={() => setCalcOpen(true)} />
